@@ -9,25 +9,12 @@ function out() {
     document.body.appendChild(node);
 }
 
-var current_worker = 0,
-    global_workers = [],
-    // xxx should be unguessable
-    current_result = 0,
-    // xxx should use weakmap
-    global_results = {};
+var global_workers = [],
+    parallel_waiters = [];
 
 
 function add_worker() {
     var worker = new Worker('webworker-child.js');
-    worker.onmessage = function(msg) {
-        var id = msg.data[0],
-            val = msg.data[1],
-            result = global_results[id];
-
-        delete global_results[id];
-
-        result.onvalue(val);
-    }
     global_workers.push(worker);
 }
 
@@ -36,10 +23,12 @@ add_worker();
 add_worker();
 add_worker();
 
-function Result() {
-    this.onvalue = function() {};
-    this.id = current_result++;
-    global_results[this.id] = this;
+const NOT_DONE_YET = {};
+
+function Result(par) {
+    this.get = function() {
+        throw new Error("get before execute");
+    }
 }
 
 Result.prototype = {
@@ -49,32 +38,55 @@ function Parallel() {
     this.children = [];
 }
 
+function make_onmessage() {
+    return function() {
+        
+    }
+}
+
+
 Parallel.prototype = {
     fork: function fork(fun) {
         var args = [];
         for (var i = 1, len = arguments.length; i < len; i++) {
             args.push(arguments[i]);
         }
-        var r = new Result();
+        var r = new Result(this);
         this.children.push([fun, args, r]);
         return r;
     },
-    execute: function execute() {
-        var c = this.children;
-        this.children = [];
-        for (var i = 0, l = c.length; i < l; i++) {
-            if (current_worker >= global_workers.length) {
-                current_worker = 0;
-            }
-            var work = global_workers[current_worker++];
-
-            var child = c[i],
-                func = child[0],
-                args = child[1],
-                res = child[2];
-
-            work.postMessage([func.toString(), JSON.stringify(args), res.id]);
+    execute: function execute(cb) {
+        this.cb = cb;
+        this.pending = this.children.length;
+        this._execute();
+    },
+    _execute: function _execute() {
+        var self = this;
+        if (!this.pending) {
+            return this.cb();
         }
+        if (this.children.length === 0 || global_workers.length === 0) {
+            return;
+        }
+
+        var work = global_workers.shift();
+        var child = this.children.shift();
+
+        work.onmessage = function(msg) {
+            msg = msg.data;
+            self.pending--;
+            child[2].get = function () {
+                if (self.pending) {
+                    throw new Error("get before execute");
+                }
+                return msg;
+            }
+            global_workers.push(work);
+            self._execute();
+        }
+        work.postMessage([child[0].toString(), JSON.stringify(child[1])]);
+        this._execute();
+        return;
     }
 }
 
@@ -83,12 +95,11 @@ function square(x) {
     return x * x;
 }
 
-out("Squares:");
+var ctx = new Parallel(),
+    t1 = ctx.fork(square, 2),
+    t2 = ctx.fork(square, 4);
 
-var ctx = new Parallel();
-
-ctx.fork(square, 2).onvalue = out;
-ctx.fork(square, 4).onvalue = out;
-
-ctx.execute();
+ctx.execute(function() {
+    out("Squares:", t1.get(), t2.get());
+});
 
