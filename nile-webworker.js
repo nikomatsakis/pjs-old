@@ -9,8 +9,7 @@ function out() {
     document.body.appendChild(node);
 }
 
-var global_workers = [],
-    parallel_waiters = [];
+var global_workers = [];
 
 
 function add_worker() {
@@ -23,27 +22,15 @@ add_worker();
 add_worker();
 add_worker();
 
-const NOT_DONE_YET = {};
-
-function Result(par) {
+function Result() {
     this.get = function() {
         throw new Error("get before execute");
     }
 }
 
-Result.prototype = {
-}
-
 function Parallel() {
     this.children = [];
 }
-
-function make_onmessage() {
-    return function() {
-        
-    }
-}
-
 
 Parallel.prototype = {
     fork: function fork(fun) {
@@ -51,7 +38,7 @@ Parallel.prototype = {
         for (var i = 1, len = arguments.length; i < len; i++) {
             args.push(arguments[i]);
         }
-        var r = new Result(this);
+        var r = new Result();
         this.children.push([fun, args, r]);
         return r;
     },
@@ -73,13 +60,13 @@ Parallel.prototype = {
         var child = this.children.shift();
 
         work.onmessage = function(msg) {
-            msg = msg.data;
+            var data = msg.data;
             self.pending--;
             child[2].get = function () {
                 if (self.pending) {
                     throw new Error("get before execute");
                 }
-                return msg;
+                return data;
             }
             global_workers.push(work);
             self._execute();
@@ -98,8 +85,11 @@ function square(x) {
 var ctx = new Parallel(),
     t1 = ctx.fork(square, 2),
     t2 = ctx.fork(square, 4);
+    t3 = ctx.fork(square, 8);
+    t4 = ctx.fork(square, 16);
+    t5 = ctx.fork(square, 32);
 
 ctx.execute(function() {
-    out("Squares:", t1.get(), t2.get());
+    out("Squares:", t1.get(), t2.get(), t3.get(), t4.get(), t5.get());
 });
 
