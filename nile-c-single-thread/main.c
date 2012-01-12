@@ -3,8 +3,28 @@
 #include <pthread.h>
 
 
+static JSClass Result_class = {
+    "Result",
+    JSCLASS_HAS_PRIVATE,
+    JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
+    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, JS_FinalizeStub,
+    JSCLASS_NO_OPTIONAL_MEMBERS
+};
+
+JSBool Result_construct(JSContext *cx, uintN argc, jsval *vp) {
+    jsval constructor = JS_THIS(cx, vp);
+
+    JSObject *self = JS_NewObject(cx, &Result_class, NULL, JSVAL_TO_OBJECT(constructor));
+
+    jsval rval;
+    int ok = JS_EvaluateScript(cx, self, "this.get = function get() { throw new Error('get before execute'); };", 69, "main", 0, &rval);
+
+    JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(self));
+    return JS_TRUE;
+}
+
 void Parallel_finalize(JSContext *cx, JSObject *obj) {
-    printf("Parallel_finalize\n");
+
 }
 
 static JSClass Parallel_class = {
@@ -21,26 +41,11 @@ JSBool Parallel_construct(JSContext *cx, uintN argc, jsval *vp) {
     JSObject *self = JS_NewObject(cx, &Parallel_class, NULL, JSVAL_TO_OBJECT(constructor));
 
     jsval rval;
-    int ok = JS_EvaluateScript(cx, self, "(function(self) { var q = []; self.fork = function fork(func) { var a = []; for (var i = 0, l = arguments.length; i < l; i++) { a[i] = arguments[i] } q.push([func, a]) }; self.execute = function execute() { var x = q; q = []; for (var i in x) { x[i][0].apply(null, x[i][1]) } } })(this)", 286, "main", 0, &rval);
-    if (!ok) printf("ERRRRRRROR\n");
-/*
-    JS_SetPrivate(cx, self, p);
-*/
-
-    printf("Parallel_construct\n");
+    JS_EvaluateScript(cx, self, "(function(self) { var q = [], p = 0; self.fork = function fork(func) { var a = [], r = new Result(); for (var i = 0, l = arguments.length; i < l; i++) { a[i] = arguments[i]; } q.push([func, a, r]); p++; return r; }; self.execute = function execute(cb) { var x = q; q = []; self.cb = cb; for (var i in x) { var f = x[i][0], a = x[i][1], r = x[i][2]; r.r = f.apply(null, a); p--; if (!p) { self.cb() } r.get = function get() { if (p) { throw new Error('get before execute');  } return this.r; }; } }; })(this)", 507, "main", 0, &rval);
 
     JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(self));
     return JS_TRUE;
 }
-
-static JSFunctionSpec Parallel_function_spec[] = {
-    JS_FS_END
-};
-
-
-
-
-
 
 
 
@@ -109,11 +114,20 @@ JSContext * make_context(JSRuntime *rt) {
 
     JSObject *result = JS_InitClass(
         cx, global, NULL,
+        &Result_class,
+        Result_construct,
+        0, // 0 args
+        NULL, // no properties
+        NULL, // no functions
+        NULL, NULL);
+
+    JSObject *par = JS_InitClass(
+        cx, global, NULL,
         &Parallel_class,
         Parallel_construct,
         0, // 0 args
         NULL, // no properties
-        Parallel_function_spec, // some functions
+        NULL, // no functions
         NULL, NULL);
 
     JS_SetGlobalObject(cx, global);
