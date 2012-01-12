@@ -894,6 +894,12 @@ class Worker MOZ_FINAL : public WorkerParent
         JSObject *ctor = JS_GetConstructor(cx, proto);
         js::SetFunctionNativeReserved(ctor, 1, PRIVATE_TO_JSVAL(threadPool));
 
+        if (!threadPool->start(cx))
+            return false;
+
+        WorkerParent *parent = threadPool->getMainQueue();
+        js::SetFunctionNativeReserved(ctor, 0, PRIVATE_TO_JSVAL(parent));
+
         return threadPool;
     }
 };
