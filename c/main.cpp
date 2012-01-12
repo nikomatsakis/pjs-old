@@ -373,7 +373,7 @@ int main(int argc, const char *argv[])
     jsval rval;
     JSBool ok;
 
-    JSScript *nile = JS_CompileUTF8File(cx, global, "nile.js");
+    JSScript *nile = JS_CompileUTF8File(cx, global, "spork.js");
     if (nile == NULL)
         return 1;
 
