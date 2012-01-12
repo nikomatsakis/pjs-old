@@ -20,6 +20,9 @@ JSBool Parallel_construct(JSContext *cx, uintN argc, jsval *vp) {
 
     JSObject *self = JS_NewObject(cx, &Parallel_class, NULL, JSVAL_TO_OBJECT(constructor));
 
+    jsval rval;
+    int ok = JS_EvaluateScript(cx, self, "(function(self) { var q = []; self.fork = function fork(func) { var a = []; for (var i = 0, l = arguments.length; i < l; i++) { a[i] = arguments[i] } q.push([func, a]) }; self.execute = function execute() { var x = q; q = []; for (var i in x) { x[i][0].apply(null, x[i][1]) } } })(this)", 286, "main", 0, &rval);
+    if (!ok) printf("ERRRRRRROR\n");
 /*
     JS_SetPrivate(cx, self, p);
 */
@@ -30,19 +33,7 @@ JSBool Parallel_construct(JSContext *cx, uintN argc, jsval *vp) {
     return JS_TRUE;
 }
 
-static JSBool Parallel_fork(JSContext *cx, uintN argc, jsval *vp) {
-    printf("Parallel_fork\n");
-    return JS_TRUE;
-}
-
-static JSBool Parallel_execute(JSContext *cx, uintN argc, jsval *vp) {
-    printf("Parallel_execute\n");
-    return JS_TRUE;
-}
-
 static JSFunctionSpec Parallel_function_spec[] = {
-    JS_FN("fork", Parallel_fork, 1, 0),
-    JS_FN("execute", Parallel_execute, 0, 0),
     JS_FS_END
 };
 
