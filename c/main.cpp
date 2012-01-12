@@ -20,7 +20,7 @@ static JSClass global_class = {
 };
 
 
-static JSBool nile_print(JSContext *cx, uintN argc, jsval *vp) {
+static JSBool spork_print(JSContext *cx, uintN argc, jsval *vp) {
     jsval *argv;
     uintN i;
     JSString *str;
@@ -44,8 +44,8 @@ static JSBool nile_print(JSContext *cx, uintN argc, jsval *vp) {
     return JS_TRUE;
 }
 
-static JSFunctionSpec nile_global_functions[] = {
-    JS_FN("print", nile_print, 0, 0),
+static JSFunctionSpec spork_global_functions[] = {
+    JS_FN("print", spork_print, 0, 0),
     JS_FS_END
 };
 
@@ -243,7 +243,7 @@ NewGlobalObject(JSContext *cx, CompartmentKind compartment)
 #endif
         if (!JS_InitReflect(cx, glob))
             return NULL;
-        if (!JS_DefineFunctions(cx, glob, nile_global_functions)) {
+        if (!JS_DefineFunctions(cx, glob, spork_global_functions)) {
             return NULL;
         }
 
@@ -328,7 +328,7 @@ JSContext * make_context(JSRuntime *rt) {
     if (!JS_InitStandardClasses(cx, global))
         return NULL;
 
-    if (!JS_DefineFunctions(cx, global, nile_global_functions))
+    if (!JS_DefineFunctions(cx, global, spork_global_functions))
         return NULL;
 
     JSObject *result = JS_InitClass(
@@ -373,8 +373,8 @@ int main(int argc, const char *argv[])
     jsval rval;
     JSBool ok;
 
-    JSScript *nile = JS_CompileUTF8File(cx, global, "spork.js");
-    if (nile == NULL)
+    JSScript *spork = JS_CompileUTF8File(cx, global, "spork.js");
+    if (spork == NULL)
         return 1;
 
     class ShellWorkerHooks : public js::workers::WorkerHooks {
@@ -389,7 +389,7 @@ int main(int argc, const char *argv[])
         return 1;
     }
 
-    ok = JS_ExecuteScript(cx, global, nile, &rval);
+    ok = JS_ExecuteScript(cx, global, spork, &rval);
     if (!ok || JSVAL_IS_NULL(rval))
         return 1;
 
