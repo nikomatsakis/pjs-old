@@ -3,7 +3,7 @@ all: spork.o main.o
 		-o spork main.o spork.o
 
 %.o: %.cpp
-	g++ -g -w -m64 \
+	g++ -DDEBUG -g -w -m64 \
 		-I/usr/local/include/nspr \
 		-I $(MOZCENTRAL)/js/src/build-debug/dist/include \
 		-o $@ -c $<

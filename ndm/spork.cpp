@@ -159,6 +159,17 @@ namespace spork {
  * the parent task is thus pushed onto the runner's local queue and
  * the runner's lock is pulsed to reawaken if it is sleeping.
  *
+ * Garbage collection
+ * ------------------
+ * 
+ * The GC strategy is as follows: each active TaskContext is
+ * "self-rooted", which means that the C++ object adds the
+ * corresponding JS object to the root set.  This is true up until
+ * the TaskContext completes, at which point the C++ object removes
+ * itself from the root set.
+ * 
+ * Each TaskContext will therefore keep its parent TaskContext
+ *
  * Future improvements
  * -------------------
  * 
@@ -338,6 +349,9 @@ private:
     {
         JS_SetPrivate(cx, _object, this);
     }
+
+    JSBool addRoot(JSContext *cx);
+    JSBool delRoot(JSContext *cx);
 
 public:
     static TaskContext *create(JSContext *cx,
@@ -685,7 +699,19 @@ TaskContext *TaskContext::create(JSContext *cx,
     }
     
     // Create C++ object, which will be linked via Private:
-    return new TaskContext(cx, aTask, aRunner, aGlobal, object);
+    TaskContext *tc = new TaskContext(cx, aTask, aRunner, aGlobal, object);
+    if (!tc->addRoot(cx)) {
+        delete tc;
+    }
+    return tc;
+}
+
+JSBool TaskContext::addRoot(JSContext *cx) {
+    return JS_AddNamedObjectRoot(cx, &_object, "TaskContext::addRoot()");
+}
+
+JSBool TaskContext::delRoot(JSContext *cx) {
+    return JS_RemoveObjectRoot(cx, &_object);
 }
 
 void TaskContext::addTaskToFork(TaskHandle *th) {
@@ -731,6 +757,7 @@ void TaskContext::resume(Runner *runner) {
             }
         } else {
             // we are done, notify our parent:
+            delRoot(cx);
             _taskHandle->onCompleted(runner, rval);
             return;
         }
@@ -755,6 +782,8 @@ Runner *Runner::create(ThreadPool *aThreadPool, int anIndex) {
     JS_SetErrorReporter(cx, reportError);
     JS_ClearContextThread(cx);
     JS_ClearRuntimeThread(rt);
+    if(getenv("SPORK_ZEAL") != NULL)
+        JS_SetGCZeal(cx, 2, 1, false);
     return new Runner(aThreadPool, anIndex, rt, cx);
 }
 
