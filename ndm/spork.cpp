@@ -362,40 +362,47 @@ public:
     JSRuntime *rt() { return _rt; }
     JSContext *cx() { return _cx; }
 
-    void reawaken(TaskContext *ctx);
-
-    void enqueueTasks(TaskHandle **begin, TaskHandle **end);
-
     void start();
-
+    void reawaken(TaskContext *ctx);
+    void enqueueTasks(TaskHandle **begin, TaskHandle **end);
     TaskContext *createTaskContext(TaskHandle *handle);
+    void terminate();
 };
 
 class ThreadPool MOZ_FINAL
 {
 private:
-    enum { threadCount = 6 };
-    PRThread *_threads[threadCount];
     int32_t _terminating;
     JSLock *_masterLock;
     PRCondVar *_masterCondVar;
+    int _threadCount;
+    PRThread **_threads;
+    Runner **_runners;
     Vector<TaskHandle*, 4, SystemAllocPolicy> _toCreate;
 
     static void start(void* arg) {
         ((Runner*) arg)->start();
     }
 
-    explicit ThreadPool(JSLock *aLock, PRCondVar *aCondVar)
+    explicit ThreadPool(JSLock *aLock, PRCondVar *aCondVar,
+                        int threadCount, PRThread **threads, Runner **runners)
       : _terminating(0)
       , _masterLock(aLock)
       , _masterCondVar(aCondVar)
+      , _threadCount(threadCount)
+      , _threads(threads)
+      , _runners(runners)
     {
-        for (int i = 0; i < threadCount; i++)
-            _threads[i] = NULL;
     }
 
 public:
     ~ThreadPool() {
+        PR_DestroyLock(_masterLock);
+        PR_DestroyCondVar(_masterCondVar);
+        delete[] _threads;
+        for (int i = 0; i < _threadCount; i++)
+            delete _runners[i];
+        delete[] _runners;
     }
 
     JSLock *masterLock() { return _masterLock; }
@@ -405,7 +412,7 @@ public:
     void start(RootTaskHandle *rth);
 
     static ThreadPool *create();
-    void terminateAll();
+    void terminate();
     void shutdown();
     int terminating() { return _terminating; }
 
@@ -485,11 +492,10 @@ static JSFunctionSpec sporkGlobalFunctions[] = {
 // Global impl
 
 JSClass Global::jsClass = {
-    "Global", JSCLASS_HAS_PRIVATE,
+    "Global", JSCLASS_GLOBAL_FLAGS,
     JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
     JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, Global::jsFinalize,
-    NULL, NULL, NULL, NULL,
-    NULL, NULL, Global::jsTrace, NULL
+    JSCLASS_NO_OPTIONAL_MEMBERS
 };
 
 // ______________________________________________________________________
@@ -504,7 +510,7 @@ JSClass TaskHandle::jsClass = {
 };
 
 void RootTaskHandle::onCompleted(Runner *runner) {
-    runner->terminateAll();
+    runner->terminate();
 }
 
 JSBool RootTaskHandle::execute(JSContext *cx, JSObject *global) {
@@ -587,8 +593,8 @@ Runner *Runner::create(ThreadPool *aThreadPool, int anIndex) {
     JS_SetOptions(cx, JSOPTION_VAROBJFIX | JSOPTION_METHODJIT);
     JS_SetVersion(cx, JSVERSION_LATEST);
     JS_SetErrorReporter(cx, reportError);
-    JS_ClearRuntimeThread(rt);
     JS_ClearContextThread(cx);
+    JS_ClearRuntimeThread(rt);
     return new Runner(aThreadPool, anIndex, rt, cx);
 }
 
@@ -633,6 +639,7 @@ void Runner::start() {
     JS_SetRuntimeThread(_rt);
     JS_SetContextThread(_cx);
     while (getWork(&reawaken, &create)) {
+        JS_BeginRequest(_cx);
         if (reawaken) {
             reawaken->resume(this);
         }
@@ -641,6 +648,7 @@ void Runner::start() {
             TaskContext *ctx = createTaskContext(create);
             ctx->resume(this);
         }
+        JS_EndRequest(_cx);
     }
 }
 
@@ -659,6 +667,10 @@ TaskContext *Runner::createTaskContext(TaskHandle *handle) {
     return new TaskContext(handle, this, global);
 }
 
+void Runner::terminate() {
+    _threadPool->terminate();
+}
+
 // ______________________________________________________________________
 // ThreadPool impl
 
@@ -673,22 +685,26 @@ ThreadPool *ThreadPool::create() {
         throw "FIXME";
     }
 
-    ThreadPool *tp = new ThreadPool(lock, condVar);
-    if (!tp) {
-        throw "FIXME";
-    }
+    const int threadCount = 4; // for now
+
+    PRThread **threads = check_null(new PRThread*[threadCount]);
+    memset(threads, 0, sizeof(PRThread*) * threadCount);
+
+    Runner **runners = check_null(new Runner*[threadCount]);
+    memset(threads, 0, sizeof(Runner*) * threadCount);
+
+    ThreadPool *tp = check_null(
+        new ThreadPool(lock, condVar, threadCount, threads, runners));
 
     for (int i = 0; i < threadCount; i++) {
-        Runner *runner = Runner::create(tp, i);
-        tp->_threads[i] = PR_CreateThread(PR_USER_THREAD, 
-                                          start, runner, 
-                                          PR_PRIORITY_NORMAL,
-                                          PR_LOCAL_THREAD, 
-                                          PR_JOINABLE_THREAD, 
-                                          0);
-        if (!tp->_threads[i]) {
-            throw "FIXME";
-        }
+        runners[i] = check_null(Runner::create(tp, i));
+        threads[i] = PR_CreateThread(PR_USER_THREAD, 
+                                     start, runners[i], 
+                                     PR_PRIORITY_NORMAL,
+                                     PR_LOCAL_THREAD, 
+                                     PR_JOINABLE_THREAD, 
+                                     0);
+        check_null(threads[i]);
     }
 
     return tp;
@@ -699,17 +715,17 @@ void ThreadPool::start(RootTaskHandle *rth) {
     if (!_toCreate.append(rth)) {
         check_null((void*)NULL);
     }
-    JS_NOTIFY_ALL_CONDVAR(_toCreate->masterCondVar());
+    JS_NOTIFY_ALL_CONDVAR(_masterCondVar);
 }
 
-void ThreadPool::terminateAll() {
+void ThreadPool::terminate() {
     AutoLock hold(_masterLock);
     _terminating = 1;
-    JS_NOTIFY_ALL_CONDVAR(_toCreate->masterCondVar());
+    JS_NOTIFY_ALL_CONDVAR(_masterCondVar);
 }
 
 void ThreadPool::shutdown() {
-    for (int i = 0; i < threadCount; i++) {
+    for (int i = 0; i < _threadCount; i++) {
         if (_threads[i]) {
             PR_JoinThread(_threads[i]);
             _threads[i] = NULL;
