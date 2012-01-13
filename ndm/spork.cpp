@@ -237,7 +237,8 @@ protected:
 public:
     virtual ~TaskHandle() {}
 
-    virtual JSBool execute(JSContext *cx, JSObject *global) = 0;
+    virtual JSBool execute(JSContext *cx, JSObject *taskctx,
+                           JSObject *global, jsval *rval) = 0;
     virtual void onCompleted(Runner *runner, jsval result) = 0;
 
     static JSClass jsClass;
@@ -252,7 +253,8 @@ public:
         : scriptfn(afn)
     {}
 
-    virtual JSBool execute(JSContext *cx, JSObject *global);
+    virtual JSBool execute(JSContext *cx, JSObject *taskctx,
+                           JSObject *global, jsval *rval);
     virtual void onCompleted(Runner *runner, jsval result);
 };
 
@@ -264,7 +266,7 @@ private:
     TaskContext *_parent;
     int _generation;
     JSObject *_object;
-    char *_toExec;
+    char *_funcStr;
     uint64_t *_result;
     size_t _nbytes;
 
@@ -273,7 +275,7 @@ private:
         : _parent(parent)
         , _generation(gen)
         , _object(object)
-        , _toExec(toExec)
+        , _funcStr(toExec)
         , _result(NULL)
         , _nbytes(0)
     {
@@ -285,12 +287,13 @@ private:
 protected:
     virtual ~ChildTaskHandle() {
         clearResult();
-        delete[] _toExec;
+        delete[] _funcStr;
     }
 
 public:
-    JSBool GetResult(JSContext *cx, jsval *result);
-    virtual JSBool execute(JSContext *cx, JSObject *global);
+    JSBool GetResult(JSContext *cx, jsval *rval);
+    virtual JSBool execute(JSContext *cx, JSObject *taskctx,
+                           JSObject *global, jsval *rval);
     virtual void onCompleted(Runner *runner, jsval result);
 
     JSObject *object() { return _object; }
@@ -306,7 +309,7 @@ public:
 class TaskContext MOZ_FINAL
 {
 public:
-    enum TaskContextSlots { ResultSlot, MaxSlot };
+    enum TaskContextSlots { MaxSlot };
 
 private:
     TaskHandle *_taskHandle;
@@ -521,13 +524,11 @@ JSBool fork(JSContext *cx, uintN argc, jsval *vp) {
         return JS_FALSE;
 
     int length = JS_GetStringEncodingLength(cx, str);
-    char *encoded = check_null(new char[length+5]);
+    char *encoded = check_null(new char[length+3]);
     JS_EncodeStringToBuffer(str, encoded+1, length);
     encoded[0] = '(';
     encoded[length+1] = ')';
-    encoded[length+2] = '(';
-    encoded[length+3] = ')';
-    encoded[length+4] = 0;
+    encoded[length+2] = 0;
     ChildTaskHandle *th = ChildTaskHandle::create(cx, taskContext, encoded);
     JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(th->object()));
 
@@ -598,19 +599,13 @@ void RootTaskHandle::onCompleted(Runner *runner, jsval result) {
     runner->terminate();
 }
 
-JSBool RootTaskHandle::execute(JSContext *cx, JSObject *global) {
+JSBool RootTaskHandle::execute(JSContext *cx, JSObject *taskctx,
+                               JSObject *global, jsval *rval) {
     JSScript *scr = JS_CompileUTF8File(cx, global, scriptfn);
     if (scr == NULL)
         return 0;
-    
-    jsval rval;
-    if (!JS_ExecuteScript(cx, global, scr, &rval))
-        return  0;
 
-    if (JSVAL_IS_NULL(rval))
-        return 0;
-
-    return 1;
+    return JS_ExecuteScript(cx, global, scr, rval);
 }
 
 void ChildTaskHandle::onCompleted(Runner *runner, jsval result) {
@@ -620,16 +615,15 @@ void ChildTaskHandle::onCompleted(Runner *runner, jsval result) {
     _parent->onChildCompleted();
 }
 
-JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *global) {
-    jsval rval;
-    if (!JS_EvaluateScript(cx, global, _toExec, strlen(_toExec),
-                           "fork", 1, &rval))
+JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *taskctx,
+                                JSObject *global, jsval *rval) {
+    jsval fnval;
+    if (!JS_EvaluateScript(cx, global, _funcStr, strlen(_funcStr),
+                           "fork", 1, &fnval))
         return  0;
 
-    if (JSVAL_IS_NULL(rval))
-        return 0;
-
-    return 1;
+    jsval args[] = { OBJECT_TO_JSVAL(taskctx) };
+    return JS_CallFunctionValue(cx, global, fnval, 1, args, rval);
 }
 
 ChildTaskHandle *ChildTaskHandle::create(JSContext *cx,
@@ -656,7 +650,7 @@ void ChildTaskHandle::clearResult() {
 }
 
 JSBool ChildTaskHandle::GetResult(JSContext *cx,
-                                  jsval *result)
+                                  jsval *rval)
 {
     if (_result != NULL) {
         jsval decloned;
@@ -674,7 +668,7 @@ JSBool ChildTaskHandle::GetResult(JSContext *cx,
         return false;
     }
 
-    return JS_GetReservedSlot(cx, _object, ResultSlot, result);
+    return JS_GetReservedSlot(cx, _object, ResultSlot, rval);
 }
 
 // ______________________________________________________________________
@@ -709,20 +703,23 @@ void TaskContext::resume(Runner *runner) {
     JSContext *cx = runner->cx();
     CrossCompartment cc(cx, _global);
 
-    JS_SetContextPrivate(cx, this);
     while (true) {
         _generation++;
 
         JSBool ok;
+        jsval rval;
+        JS_SetContextPrivate(cx, this);
         if (!_oncompletion) {
-            ok = _taskHandle->execute(cx, _global);
+            ok = _taskHandle->execute(cx, _object, _global, &rval);
         } else {
             jsval fn = OBJECT_TO_JSVAL(_oncompletion);
-            jsval rval;
             _oncompletion = NULL;
             ok = JS_CallFunctionValue(cx, _global, fn, 0, NULL, &rval);
         }
         JS_SetContextPrivate(cx, NULL);
+
+        if (!ok)
+            rval = JSVAL_NULL;
 
         if (_oncompletion) {
             // fork off outstanding children then block till they're done:
@@ -734,10 +731,7 @@ void TaskContext::resume(Runner *runner) {
             }
         } else {
             // we are done, notify our parent:
-            jsval result = JSVAL_NULL;
-            JS_GetReservedSlot(cx, _object, ResultSlot, &result);
-            _taskHandle->onCompleted(runner, result);
-            JS_SetReservedSlot(cx, _object, ResultSlot, JSVAL_NULL);
+            _taskHandle->onCompleted(runner, rval);
             return;
         }
     }
