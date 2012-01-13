@@ -168,6 +168,15 @@ namespace spork {
  * important piece of this is figuring out when to go idle, this will
  * be critical for real deployment.  I can't recall the right protocol
  * for this and don't want to implement it at the moment anyhow.
+ *
+ * Here is a proposal for the protocol:
+ * - You have a shared counter on the thread pool, guarded by a lock (for
+ *   now).
+ * - The counter initially 0,
+ *   but set to MAX_INT when there are idle 
+ * - Whenever a a new task is pushed, the thread examines
+ *   the counter: if it is < MAX_INT, 
+ *   increments the counter.
  ************************************************************/
 
 class ThreadPool;
@@ -211,7 +220,7 @@ public:
 class TaskHandle MOZ_FINAL
 {
 public:
-    enum Slots { ResultSlot };
+    enum Slots { ResultSlot, MaxSlot };
 
 private:
     TaskHandle(const TaskHandle &) MOZ_DELETE;
@@ -579,7 +588,7 @@ JSClass Global::jsClass = {
 // TaskHandle impl
 
 JSClass TaskHandle::jsClass = {
-    "TaskHandle", JSCLASS_HAS_PRIVATE,
+    "TaskHandle", JSCLASS_HAS_PRIVATE | JSCLASS_HAS_RESERVED_SLOTS(MaxSlot),
     JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
     JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, TaskHandle::jsFinalize,
     JSCLASS_NO_OPTIONAL_MEMBERS
@@ -590,8 +599,6 @@ void RootTaskHandle::onCompleted(Runner *runner, jsval result) {
 }
 
 JSBool RootTaskHandle::execute(JSContext *cx, JSObject *global) {
-    CrossCompartment cc(cx, global);
-
     JSScript *scr = JS_CompileUTF8File(cx, global, scriptfn);
     if (scr == NULL)
         return 0;
@@ -614,8 +621,6 @@ void ChildTaskHandle::onCompleted(Runner *runner, jsval result) {
 }
 
 JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *global) {
-    CrossCompartment cc(cx, global);
-
     jsval rval;
     if (!JS_EvaluateScript(cx, global, _toExec, strlen(_toExec),
                            "fork", 1, &rval))
@@ -702,6 +707,7 @@ void TaskContext::onChildCompleted() {
 
 void TaskContext::resume(Runner *runner) {
     JSContext *cx = runner->cx();
+    CrossCompartment cc(cx, _global);
 
     JS_SetContextPrivate(cx, this);
     while (true) {
@@ -729,9 +735,9 @@ void TaskContext::resume(Runner *runner) {
         } else {
             // we are done, notify our parent:
             jsval result = JSVAL_NULL;
-            //JS_GetReservedSlot(cx, _object, ResultSlot, &result);
+            JS_GetReservedSlot(cx, _object, ResultSlot, &result);
             _taskHandle->onCompleted(runner, result);
-            //JS_SetReservedSlot(cx, _object, ResultSlot, JSVAL_NULL);
+            JS_SetReservedSlot(cx, _object, ResultSlot, JSVAL_NULL);
             return;
         }
     }
