@@ -183,22 +183,21 @@ template<typename T> T* check_null(T* ptr) {
 typedef Vector<TaskHandle*, 4, SystemAllocPolicy> TaskHandleVec;
 typedef Vector<TaskContext*, 4, SystemAllocPolicy> TaskContextVec;
 
-// ____________________________________________________________
-#pragma mark Tasks and Contexts
-
 static ThreadPool *unwrap(JSContext *cx, JSObject *obj) {
     JS_ASSERT(JS_GET_CLASS(cx, obj) == &jsClass);
     return (ThreadPool *) JS_GetPrivate(cx, obj);
 }
 
+// ____________________________________________________________
+// TaskHandle interface
+
 class TaskHandle MOZ_FINAL
 {
 public:
-    enum Slots { parentSlot };
+    enum Slots { resultSlot };
 
 private:
-    TaskContext *parent;
-    JSObject *object;
+    JSObject *_result;
 
     TaskHandle(const TaskHandle &) MOZ_DELETE;
     TaskHandle & operator=(const TaskHandle &) MOZ_DELETE;
@@ -212,14 +211,43 @@ private:
     static void jsFinalize(JSContext *cx, JSObject *obj) {
     }
 
-public:
-    TaskHandle(TaskContext *aParent)
-      : parent(aParent)
-      , object(NULL)
+protected:
+    TaskHandle()
+      : _result(NULL)
     {}
+
+public:
+    virtual JSBool execute(JSContext *cx, JSObject *global) = 0;
+    virtual void onCompleted(Runner *runner) = 0;
 
     static JSClass jsClass;
 };
+
+class RootTaskHandle : public TaskHandle
+{
+    const char *scriptfn;
+
+public:
+    RootTaskHandle(const char *afn)
+        : scriptfn(afn)
+    {}
+
+    virtual JSBool execute(JSContext *cx, JSObject *global);
+    virtual void onCompleted(Runner *runner);
+};
+
+class ChildTaskHandle : public TaskHandle
+{
+private:
+    TaskContext *_parent;
+
+public:
+    virtual JSBool execute(JSContext *cx, JSObject *global);
+    virtual void onCompleted(Runner *runner);
+};
+
+// ______________________________________________________________________
+// TaskContext interface
 
 class TaskContext MOZ_FINAL
 {
@@ -260,13 +288,17 @@ public:
 
     void resume(Runner *runner);
 
+    void setOncompletion(JSObject *obj) {
+        _oncompletion = obj;
+    }
+
     static JSClass jsClass;
 };
 
 // ____________________________________________________________
 // Global interface
 
-class SporkGlobal MOZ_FINAL
+class Global MOZ_FINAL
 {
 private:
     JSObject *_object;
@@ -280,7 +312,7 @@ private:
     static void jsFinalize(JSContext *cx, JSObject *obj) {
     }
 
-    SporkGlobal(JSObject *anObject)
+    Global(JSObject *anObject)
       : _object(anObject)
     {}
 
@@ -314,9 +346,6 @@ private:
       , _rt(aRt)
       , _cx(aCx)
     {
-        JS_SetOptions(_cx, JSOPTION_VAROBJFIX | JSOPTION_METHODJIT);
-        JS_SetVersion(_cx, JSVERSION_LATEST);
-        //JS_SetErrorReporter(cx, report_error);
     }
 
 public:
@@ -373,25 +402,14 @@ public:
     PRCondVar *masterCondVar() { return _masterCondVar; }
     TaskHandleVec *toCreate() { return &_toCreate; }
 
+    void start(RootTaskHandle *rth);
+
     static ThreadPool *create();
+    void terminateAll();
+    void shutdown();
+    int terminating() { return _terminating; }
 
-    void terminateAll() {
-        // See comment about JS_ATOMIC_SET in the implementation of
-        // JS_TriggerOperationCallback.
-        JS_ATOMIC_SET(&_terminating, 1);
-    }
-
-    /* This context is used only to free memory. */
-    void shutdown() {
-        for (int i = 0; i < threadCount; i++) {
-            if (_threads[i]) {
-                PR_JoinThread(_threads[i]);
-                _threads[i] = NULL;
-            }
-        }
-    }
-
-  private:
+private:
     static void jsFinalize(JSContext *cx, JSObject *obj) {
         if (ThreadPool *tp = unwrap(cx, obj))
             delete tp;
@@ -401,7 +419,16 @@ public:
 // ______________________________________________________________________
 // Global functions
 
-static JSBool sporkPrint(JSContext *cx, uintN argc, jsval *vp) {
+/* The error reporter callback. */
+void reportError(JSContext *cx, const char *message, JSErrorReport *report)
+{
+    fprintf(stderr, "%s:%u:%s\n",
+            report->filename ? report->filename : "<no filename>",
+            (unsigned int) report->lineno,
+            message);
+}
+
+JSBool print(JSContext *cx, uintN argc, jsval *vp) {
     jsval *argv;
     uintN i;
     JSString *str;
@@ -425,21 +452,83 @@ static JSBool sporkPrint(JSContext *cx, uintN argc, jsval *vp) {
     return JS_TRUE;
 }
 
+JSBool fork(JSContext *cx, uintN argc, jsval *vp) {
+    TaskContext *taskContext = (TaskContext*) JS_GetContextPrivate(cx);
+    JSString *str;
+    if (!JS_ConvertArguments(cx, argc, JS_ARGV(cx, vp), "S", &str))
+        return JS_FALSE;
+    // TODO
+    return JS_TRUE;
+}
+
+JSBool oncompletion(JSContext *cx, uintN argc, jsval *vp) {
+    TaskContext *taskContext = (TaskContext*) JS_GetContextPrivate(cx);
+    JSObject *func;
+    if (!JS_ConvertArguments(cx, argc, JS_ARGV(cx, vp), "S", &func))
+        return JS_FALSE;
+    if (!JS_ObjectIsFunction(cx, func)) {
+        JS_ReportError(cx, "expected function as argument");
+        return JS_FALSE;
+    }
+    taskContext->setOncompletion(func);
+    return JS_TRUE;
+}
+
 static JSFunctionSpec sporkGlobalFunctions[] = {
-    JS_FN("print", sporkPrint, 0, 0),
+    JS_FN("print", print, 0, 0),
+    JS_FN("fork", fork, 1, 0),
+    JS_FN("oncompletion", oncompletion, 1, 0),
     JS_FS_END
 };
 
 // ______________________________________________________________________
-// TaskHandle
+// Global impl
+
+JSClass Global::jsClass = {
+    "Global", JSCLASS_HAS_PRIVATE,
+    JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
+    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, Global::jsFinalize,
+    NULL, NULL, NULL, NULL,
+    NULL, NULL, Global::jsTrace, NULL
+};
+
+// ______________________________________________________________________
+// TaskHandle impl
 
 JSClass TaskHandle::jsClass = {
     "TaskHandle", JSCLASS_HAS_PRIVATE,
     JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
-    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, jsFinalize,
+    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, TaskHandle::jsFinalize,
     NULL, NULL, NULL, NULL,
     NULL, NULL, TaskHandle::jsTrace, NULL
 };
+
+void RootTaskHandle::onCompleted(Runner *runner) {
+    runner->terminateAll();
+}
+
+JSBool RootTaskHandle::execute(JSContext *cx, JSObject *global) {
+    JSScript *scr = JS_CompileUTF8File(cx, global, scriptfn);
+    if (scr == NULL)
+        return 0;
+    
+    jsval rval;
+    if (!JS_ExecuteScript(cx, global, scr, &rval))
+        return  0;
+
+    if (JSVAL_IS_NULL(rval))
+        return 0;
+
+    return 1;
+}
+
+void ChildTaskHandle::onCompleted(Runner *runner) {
+    _parent->onChildCompleted();
+}
+
+JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *global) {
+    return 1;
+}
 
 // ______________________________________________________________________
 // TaskContext
@@ -457,13 +546,27 @@ void TaskContext::onChildCompleted() {
 
 void TaskContext::resume(Runner *runner) {
     JSContext *cx = runner->cx();
-    JSScript *nile = JS_CompileUTF8File(cx, _global, "nile.js");
-    jsval rval;
-    JSBool ok = JS_ExecuteScript(cx, _global, nile, &rval);
-    if (_oncompletion != NULL) {
+
+    JS_SetContextPrivate(cx, this);
+    JSBool ok;
+    if (!_oncompletion) {
+        ok = _taskHandle->execute(cx, _global);
+    } else {
+        jsval fn = OBJECT_TO_JSVAL(_oncompletion);
+        jsval rval;
+        _oncompletion = NULL;
+        ok = JS_CallFunctionValue(cx, _global, fn, 0, NULL, &rval);
+    }
+    JS_SetContextPrivate(cx, NULL);
+
+    if (_oncompletion) {
+        // fork off outstanding children:
         JS_ATOMIC_ADD(&_outstandingChildren, _toFork.length());
         runner->enqueueTasks(_toFork.begin(), _toFork.end());
         _toFork.clear();
+    } else {
+        // we are done, notify our parent:
+        _taskHandle->onCompleted(runner);
     }
 }
 
@@ -481,7 +584,11 @@ JSClass TaskContext::jsClass = {
 Runner *Runner::create(ThreadPool *aThreadPool, int anIndex) {
     JSRuntime *rt = check_null(JS_NewRuntime(1L * 1024L * 1024L));
     JSContext *cx = check_null(JS_NewContext(rt, 8192));
+    JS_SetOptions(cx, JSOPTION_VAROBJFIX | JSOPTION_METHODJIT);
+    JS_SetVersion(cx, JSVERSION_LATEST);
+    JS_SetErrorReporter(cx, reportError);
     JS_ClearRuntimeThread(rt);
+    JS_ClearContextThread(cx);
     return new Runner(aThreadPool, anIndex, rt, cx);
 }
 
@@ -494,11 +601,14 @@ bool Runner::getWork(TaskContext **reawaken, TaskHandle **create) {
             return true;
         }
             
+        if (_threadPool->terminating())
+            return false;
+
         if (!_threadPool->toCreate()->empty()) {
             *create = _threadPool->toCreate()->popCopy();
             return true;
         }
-            
+
         JS_WAIT_CONDVAR(_threadPool->masterCondVar(), JS_NO_TIMEOUT);
     }
 }
@@ -520,6 +630,8 @@ void Runner::enqueueTasks(TaskHandle **begin, TaskHandle **end) {
 void Runner::start() {
     TaskContext *reawaken = NULL;
     TaskHandle *create = NULL;
+    JS_SetRuntimeThread(_rt);
+    JS_SetContextThread(_cx);
     while (getWork(&reawaken, &create)) {
         if (reawaken) {
             reawaken->resume(this);
@@ -535,7 +647,7 @@ void Runner::start() {
 TaskContext *Runner::createTaskContext(TaskHandle *handle) {
     JSObject *global = JS_NewCompartmentAndGlobalObject(
         /*JSContext *cx: */ _cx, 
-        /*JSClass *clasp: */ &SporkGlobal::jsClass,
+        /*JSClass *clasp: */ &Global::jsClass,
         /*JSPrincipals*/ NULL);
 
     if (!JS_InitStandardClasses(_cx, global))
@@ -580,6 +692,39 @@ ThreadPool *ThreadPool::create() {
     }
 
     return tp;
+}
+
+void ThreadPool::start(RootTaskHandle *rth) {
+    AutoLock hold(_masterLock);
+    if (!_toCreate.append(rth)) {
+        check_null((void*)NULL);
+    }
+    JS_NOTIFY_ALL_CONDVAR(_toCreate->masterCondVar());
+}
+
+void ThreadPool::terminateAll() {
+    AutoLock hold(_masterLock);
+    _terminating = 1;
+    JS_NOTIFY_ALL_CONDVAR(_toCreate->masterCondVar());
+}
+
+void ThreadPool::shutdown() {
+    for (int i = 0; i < threadCount; i++) {
+        if (_threads[i]) {
+            PR_JoinThread(_threads[i]);
+            _threads[i] = NULL;
+        }
+    }
+}
+
+// ______________________________________________________________________
+// Init
+
+ThreadPool *init(const char *scriptfn) {
+    ThreadPool *tp = check_null(ThreadPool::create());
+    RootTaskHandle *rth = new RootTaskHandle(scriptfn);
+    tp->start(rth);
+    tp->shutdown();
 }
 
 }
