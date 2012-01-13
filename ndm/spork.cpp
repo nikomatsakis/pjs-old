@@ -210,7 +210,7 @@ public:
 class TaskHandle MOZ_FINAL
 {
 public:
-    enum Slots { resultSlot };
+    enum Slots { ResultSlot };
 
 private:
     TaskHandle(const TaskHandle &) MOZ_DELETE;
@@ -228,7 +228,7 @@ public:
     virtual ~TaskHandle() {}
 
     virtual JSBool execute(JSContext *cx, JSObject *global) = 0;
-    virtual void onCompleted(Runner *runner) = 0;
+    virtual void onCompleted(Runner *runner, jsval result) = 0;
 
     static JSClass jsClass;
 };
@@ -243,34 +243,45 @@ public:
     {}
 
     virtual JSBool execute(JSContext *cx, JSObject *global);
-    virtual void onCompleted(Runner *runner);
+    virtual void onCompleted(Runner *runner, jsval result);
 };
 
 class ChildTaskHandle : public TaskHandle
 {
+    enum Reserved { Result };
+
 private:
-    enum Reserved { Func, Result };
     TaskContext *_parent;
+    int _generation;
     JSObject *_object;
     char *_toExec;
+    uint64_t *_result;
+    size_t _nbytes;
 
-    explicit ChildTaskHandle(JSContext *cx, TaskContext *parent,
+    explicit ChildTaskHandle(JSContext *cx, TaskContext *parent, int gen,
                              JSObject *object, char *toExec)
         : _parent(parent)
+        , _generation(gen)
         , _object(object)
         , _toExec(toExec)
+        , _result(NULL)
+        , _nbytes(0)
     {
         JS_SetPrivate(cx, _object, this);
     }
 
+    void clearResult();
+
 protected:
     virtual ~ChildTaskHandle() {
+        clearResult();
         delete[] _toExec;
     }
 
 public:
+    JSBool GetResult(JSContext *cx, jsval *result);
     virtual JSBool execute(JSContext *cx, JSObject *global);
-    virtual void onCompleted(Runner *runner);
+    virtual void onCompleted(Runner *runner, jsval result);
 
     JSObject *object() { return _object; }
 
@@ -285,13 +296,14 @@ public:
 class TaskContext MOZ_FINAL
 {
 public:
-    enum Slots { taskHandleSlot, resultSlot, globalSlot };
+    enum TaskContextSlots { ResultSlot, MaxSlot };
 
 private:
     TaskHandle *_taskHandle;
-    JSObject *_result;
     JSObject *_global;
+    JSObject *_object;
     JSObject *_oncompletion;
+    int _generation;
     jsrefcount _outstandingChildren;
     TaskHandleVec _toFork;
     Runner *_runner;
@@ -300,21 +312,37 @@ private:
         delete_assoc<TaskContext>(cx, obj);
     }
 
-public:
-    TaskContext(TaskHandle *aTask, Runner *aRunner, JSObject *aGlobal)
+    TaskContext(JSContext *cx, TaskHandle *aTask,
+                Runner *aRunner, JSObject *aGlobal,
+                JSObject *object)
       : _taskHandle(aTask)
-      , _result(NULL)
       , _global(aGlobal)
+      , _object(object)
       , _oncompletion(NULL)
+      , _generation(0)
       , _outstandingChildren(0)
       , _runner(aRunner)
-    {}
+    {
+        JS_SetPrivate(cx, _object, this);
+    }
+
+public:
+    static TaskContext *create(JSContext *cx,
+                               TaskHandle *aTask,
+                               Runner *aRunner,
+                               JSObject *aGlobal);
 
     void addTaskToFork(TaskHandle *th);
 
     void onChildCompleted();
 
     void resume(Runner *runner);
+
+    int generation() { return _generation; }
+
+    int generationReady(int gen) {
+        return _generation > gen;
+    }
 
     void setOncompletion(JSObject *obj) {
         _oncompletion = obj;
@@ -497,6 +525,24 @@ JSBool fork(JSContext *cx, uintN argc, jsval *vp) {
     return JS_TRUE;
 }
 
+JSBool gettaskresult(JSContext *cx, uintN argc, jsval *vp) {
+    // FIXME--method on task
+    TaskContext *taskContext = (TaskContext*) JS_GetContextPrivate(cx);
+    JSObject *taskObj;
+    if (!JS_ConvertArguments(cx, argc, JS_ARGV(cx, vp), "o", &taskObj))
+        return JS_FALSE;
+    if (JS_GetClass(cx, taskObj) != &TaskHandle::jsClass) {
+        JS_ReportError(cx, "expected task as argument");
+        return JS_FALSE;
+    }
+    ChildTaskHandle *task = (ChildTaskHandle*) JS_GetPrivate(cx, taskObj);
+    jsval result;
+    if (!task->GetResult(cx, &result))
+        return JS_FALSE;
+    JS_SET_RVAL(cx, vp, result);
+    return JS_TRUE;
+}
+
 JSBool oncompletion(JSContext *cx, uintN argc, jsval *vp) {
     TaskContext *taskContext = (TaskContext*) JS_GetContextPrivate(cx);
     JSObject *func;
@@ -513,6 +559,7 @@ JSBool oncompletion(JSContext *cx, uintN argc, jsval *vp) {
 static JSFunctionSpec sporkGlobalFunctions[] = {
     JS_FN("print", print, 0, 0),
     JS_FN("fork", fork, 1, 0),
+    JS_FN("gettaskresult", gettaskresult, 1, 0),
     JS_FN("oncompletion", oncompletion, 1, 0),
     JS_FS_END
 };
@@ -537,7 +584,7 @@ JSClass TaskHandle::jsClass = {
     JSCLASS_NO_OPTIONAL_MEMBERS
 };
 
-void RootTaskHandle::onCompleted(Runner *runner) {
+void RootTaskHandle::onCompleted(Runner *runner, jsval result) {
     runner->terminate();
 }
 
@@ -558,7 +605,10 @@ JSBool RootTaskHandle::execute(JSContext *cx, JSObject *global) {
     return 1;
 }
 
-void ChildTaskHandle::onCompleted(Runner *runner) {
+void ChildTaskHandle::onCompleted(Runner *runner, jsval result) {
+    // Clone the result:
+    JS_WriteStructuredClone(runner->cx(), result, &_result, &_nbytes,
+                            NULL, NULL);
     _parent->onChildCompleted();
 }
 
@@ -586,13 +636,57 @@ ChildTaskHandle *ChildTaskHandle::create(JSContext *cx,
     }
     
     // Create C++ object, which will be linked via Private:
-    ChildTaskHandle *th = new ChildTaskHandle(cx, parent, object, toExec);
+    ChildTaskHandle *th = new ChildTaskHandle(cx, parent, parent->generation(),
+                                              object, toExec);
     return th;
 }
 
+void ChildTaskHandle::clearResult() {
+    if (_result) {
+        js::Foreground::free_(_result);
+        _result = 0;
+        _nbytes = 0;
+    }
+}
+
+JSBool ChildTaskHandle::GetResult(JSContext *cx,
+                                  jsval *result)
+{
+    if (_result != NULL) {
+        jsval decloned;
+        if (!JS_ReadStructuredClone(cx, _result, _nbytes, 
+                                    JS_STRUCTURED_CLONE_VERSION, &decloned,
+                                    NULL, NULL))
+            return false;
+        clearResult();
+
+        JS_SetReservedSlot(cx, _object, ResultSlot, decloned);
+    }
+
+    if (!_parent->generationReady(_generation)) {
+        JS_ReportError(cx, "all child tasks not yet completed");
+        return false;
+    }
+
+    return JS_GetReservedSlot(cx, _object, ResultSlot, result);
+}
 
 // ______________________________________________________________________
-// TaskContext
+// TaskContext impl
+
+TaskContext *TaskContext::create(JSContext *cx,
+                                 TaskHandle *aTask,
+                                 Runner *aRunner,
+                                 JSObject *aGlobal) {
+    // To start, create the JS object representative:
+    JSObject *object = JS_NewObject(cx, &jsClass, NULL, NULL);
+    if (!object) {
+        return NULL;
+    }
+    
+    // Create C++ object, which will be linked via Private:
+    return new TaskContext(cx, aTask, aRunner, aGlobal, object);
+}
 
 void TaskContext::addTaskToFork(TaskHandle *th) {
     _toFork.append(th);
@@ -610,6 +704,8 @@ void TaskContext::resume(Runner *runner) {
 
     JS_SetContextPrivate(cx, this);
     while (true) {
+        _generation++;
+
         JSBool ok;
         if (!_oncompletion) {
             ok = _taskHandle->execute(cx, _global);
@@ -622,7 +718,7 @@ void TaskContext::resume(Runner *runner) {
         JS_SetContextPrivate(cx, NULL);
 
         if (_oncompletion) {
-            // fork off outstanding children:
+            // fork off outstanding children then block till they're done:
             if (!_toFork.empty()) {
                 JS_ATOMIC_ADD(&_outstandingChildren, _toFork.length());
                 runner->enqueueTasks(_toFork.begin(), _toFork.end());
@@ -631,14 +727,17 @@ void TaskContext::resume(Runner *runner) {
             }
         } else {
             // we are done, notify our parent:
-            _taskHandle->onCompleted(runner);
+            jsval result = JSVAL_NULL;
+            //JS_GetReservedSlot(cx, _object, ResultSlot, &result);
+            _taskHandle->onCompleted(runner, result);
+            //JS_SetReservedSlot(cx, _object, ResultSlot, JSVAL_NULL);
             return;
         }
     }
 }
 
 JSClass TaskContext::jsClass = {
-    "TaskContext", JSCLASS_HAS_PRIVATE,
+    "TaskContext", JSCLASS_HAS_PRIVATE | JSCLASS_HAS_RESERVED_SLOTS(MaxSlot),
     JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
     JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, TaskContext::jsFinalize,
     JSCLASS_NO_OPTIONAL_MEMBERS
@@ -728,7 +827,7 @@ TaskContext *Runner::createTaskContext(TaskHandle *handle) {
     if (!JS_DefineFunctions(_cx, global, sporkGlobalFunctions))
         return NULL;
 
-    return new TaskContext(handle, this, global);
+    return TaskContext::create(_cx, handle, this, global);
 }
 
 void Runner::terminate() {
