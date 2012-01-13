@@ -183,9 +183,10 @@ template<typename T> T* check_null(T* ptr) {
 typedef Vector<TaskHandle*, 4, SystemAllocPolicy> TaskHandleVec;
 typedef Vector<TaskContext*, 4, SystemAllocPolicy> TaskContextVec;
 
-static ThreadPool *unwrap(JSContext *cx, JSObject *obj) {
-    JS_ASSERT(JS_GET_CLASS(cx, obj) == &jsClass);
-    return (ThreadPool *) JS_GetPrivate(cx, obj);
+template<class T>
+void delete_assoc(JSContext *cx, JSObject *obj) {
+    T* t = (T*) JS_GetPrivate(cx, obj);
+    delete t;
 }
 
 // ____________________________________________________________
@@ -197,26 +198,20 @@ public:
     enum Slots { resultSlot };
 
 private:
-    JSObject *_result;
-
     TaskHandle(const TaskHandle &) MOZ_DELETE;
     TaskHandle & operator=(const TaskHandle &) MOZ_DELETE;
 
-    static JSBool jsConstruct(JSContext *cx, uintN argc, jsval *vp) {
-    }
-
-    static void jsTrace(JSTracer *trc, JSObject *obj) {
-    }
-
     static void jsFinalize(JSContext *cx, JSObject *obj) {
+        delete_assoc<TaskHandle>(cx, obj);
     }
 
 protected:
     TaskHandle()
-      : _result(NULL)
     {}
 
 public:
+    virtual ~TaskHandle() {}
+
     virtual JSBool execute(JSContext *cx, JSObject *global) = 0;
     virtual void onCompleted(Runner *runner) = 0;
 
@@ -239,11 +234,34 @@ public:
 class ChildTaskHandle : public TaskHandle
 {
 private:
+    enum Reserved { Func, Result };
     TaskContext *_parent;
+    JSObject *_object;
+    char *_toExec;
+
+    explicit ChildTaskHandle(JSContext *cx, TaskContext *parent,
+                             JSObject *object, char *toExec)
+        : _parent(parent)
+        , _object(object)
+        , _toExec(toExec)
+    {
+        JS_SetPrivate(cx, _object, this);
+    }
+
+protected:
+    virtual ~ChildTaskHandle() {
+        delete[] _toExec;
+    }
 
 public:
     virtual JSBool execute(JSContext *cx, JSObject *global);
     virtual void onCompleted(Runner *runner);
+
+    JSObject *object() { return _object; }
+
+    static ChildTaskHandle *create(JSContext *cx,
+                                   TaskContext *parent,
+                                   char *toExec);
 };
 
 // ______________________________________________________________________
@@ -263,13 +281,8 @@ private:
     TaskHandleVec _toFork;
     Runner *_runner;
     
-    static JSBool jsConstruct(JSContext *cx, uintN argc, jsval *vp) {
-    }
-
-    static void jsTrace(JSTracer *trc, JSObject *obj) {
-    }
-
     static void jsFinalize(JSContext *cx, JSObject *obj) {
+        delete_assoc<TaskContext>(cx, obj);
     }
 
 public:
@@ -303,13 +316,8 @@ class Global MOZ_FINAL
 private:
     JSObject *_object;
 
-    static JSBool jsConstruct(JSContext *cx, uintN argc, jsval *vp) {
-    }
-
-    static void jsTrace(JSTracer *trc, JSObject *obj) {
-    }
-
     static void jsFinalize(JSContext *cx, JSObject *obj) {
+        delete_assoc<Global>(cx, obj);
     }
 
     Global(JSObject *anObject)
@@ -415,12 +423,6 @@ public:
     void terminate();
     void shutdown();
     int terminating() { return _terminating; }
-
-private:
-    static void jsFinalize(JSContext *cx, JSObject *obj) {
-        if (ThreadPool *tp = unwrap(cx, obj))
-            delete tp;
-    }
 };
 
 // ______________________________________________________________________
@@ -464,7 +466,14 @@ JSBool fork(JSContext *cx, uintN argc, jsval *vp) {
     JSString *str;
     if (!JS_ConvertArguments(cx, argc, JS_ARGV(cx, vp), "S", &str))
         return JS_FALSE;
-    // TODO
+
+    int length = JS_GetStringEncodingLength(cx, str);
+    char *encoded = check_null(new char[length]);
+    JS_EncodeStringToBuffer(str, encoded, length);
+    ChildTaskHandle *th = ChildTaskHandle::create(cx, taskContext, encoded);
+    JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(th->object()));
+
+    //taskContext->addTaskToFork(th);
     return JS_TRUE;
 }
 
@@ -505,8 +514,7 @@ JSClass TaskHandle::jsClass = {
     "TaskHandle", JSCLASS_HAS_PRIVATE,
     JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
     JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, TaskHandle::jsFinalize,
-    NULL, NULL, NULL, NULL,
-    NULL, NULL, TaskHandle::jsTrace, NULL
+    JSCLASS_NO_OPTIONAL_MEMBERS
 };
 
 void RootTaskHandle::onCompleted(Runner *runner) {
@@ -535,6 +543,21 @@ void ChildTaskHandle::onCompleted(Runner *runner) {
 JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *global) {
     return 1;
 }
+
+ChildTaskHandle *ChildTaskHandle::create(JSContext *cx,
+                                         TaskContext *parent,
+                                         char *toExec) {
+    // To start, create the JS object representative:
+    JSObject *object = JS_NewObject(cx, &jsClass, NULL, NULL);
+    if (!object) {
+        return NULL;
+    }
+    
+    // Create C++ object, which will be linked via Private:
+    ChildTaskHandle *th = new ChildTaskHandle(cx, parent, object, toExec);
+    return th;
+}
+
 
 // ______________________________________________________________________
 // TaskContext
@@ -586,8 +609,7 @@ JSClass TaskContext::jsClass = {
     "TaskContext", JSCLASS_HAS_PRIVATE,
     JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
     JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, TaskContext::jsFinalize,
-    NULL, NULL, NULL, NULL,
-    NULL, NULL, TaskContext::jsTrace, NULL
+    JSCLASS_NO_OPTIONAL_MEMBERS
 };
 
 // ______________________________________________________________________

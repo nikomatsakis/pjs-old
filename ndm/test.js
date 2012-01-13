@@ -1,4 +1,8 @@
 print("hi");
+foo = fork(function() {
+    print("in_fork");
+});
+print(foo);
 oncompletion(function() {
-    print("ho");
+    print("in_completion");
 });
