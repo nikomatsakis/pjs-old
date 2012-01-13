@@ -471,7 +471,7 @@ JSBool fork(JSContext *cx, uintN argc, jsval *vp) {
 JSBool oncompletion(JSContext *cx, uintN argc, jsval *vp) {
     TaskContext *taskContext = (TaskContext*) JS_GetContextPrivate(cx);
     JSObject *func;
-    if (!JS_ConvertArguments(cx, argc, JS_ARGV(cx, vp), "S", &func))
+    if (!JS_ConvertArguments(cx, argc, JS_ARGV(cx, vp), "o", &func))
         return JS_FALSE;
     if (!JS_ObjectIsFunction(cx, func)) {
         JS_ReportError(cx, "expected function as argument");
@@ -554,25 +554,31 @@ void TaskContext::resume(Runner *runner) {
     JSContext *cx = runner->cx();
 
     JS_SetContextPrivate(cx, this);
-    JSBool ok;
-    if (!_oncompletion) {
-        ok = _taskHandle->execute(cx, _global);
-    } else {
-        jsval fn = OBJECT_TO_JSVAL(_oncompletion);
-        jsval rval;
-        _oncompletion = NULL;
-        ok = JS_CallFunctionValue(cx, _global, fn, 0, NULL, &rval);
-    }
-    JS_SetContextPrivate(cx, NULL);
+    while (true) {
+        JSBool ok;
+        if (!_oncompletion) {
+            ok = _taskHandle->execute(cx, _global);
+        } else {
+            jsval fn = OBJECT_TO_JSVAL(_oncompletion);
+            jsval rval;
+            _oncompletion = NULL;
+            ok = JS_CallFunctionValue(cx, _global, fn, 0, NULL, &rval);
+        }
+        JS_SetContextPrivate(cx, NULL);
 
-    if (_oncompletion) {
-        // fork off outstanding children:
-        JS_ATOMIC_ADD(&_outstandingChildren, _toFork.length());
-        runner->enqueueTasks(_toFork.begin(), _toFork.end());
-        _toFork.clear();
-    } else {
-        // we are done, notify our parent:
-        _taskHandle->onCompleted(runner);
+        if (_oncompletion) {
+            // fork off outstanding children:
+            if (!_toFork.empty()) {
+                JS_ATOMIC_ADD(&_outstandingChildren, _toFork.length());
+                runner->enqueueTasks(_toFork.begin(), _toFork.end());
+                _toFork.clear();
+                return;
+            }
+        } else {
+            // we are done, notify our parent:
+            _taskHandle->onCompleted(runner);
+            return;
+        }
     }
 }
 
