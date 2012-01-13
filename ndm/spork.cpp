@@ -483,12 +483,13 @@ JSBool fork(JSContext *cx, uintN argc, jsval *vp) {
         return JS_FALSE;
 
     int length = JS_GetStringEncodingLength(cx, str);
-    char *encoded = check_null(new char[length+4]);
+    char *encoded = check_null(new char[length+5]);
     JS_EncodeStringToBuffer(str, encoded+1, length);
     encoded[0] = '(';
     encoded[length+1] = ')';
     encoded[length+2] = '(';
     encoded[length+3] = ')';
+    encoded[length+4] = 0;
     ChildTaskHandle *th = ChildTaskHandle::create(cx, taskContext, encoded);
     JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(th->object()));
 
