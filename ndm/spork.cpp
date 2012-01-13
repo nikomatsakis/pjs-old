@@ -659,6 +659,8 @@ Runner *Runner::create(ThreadPool *aThreadPool, int anIndex) {
 
 bool Runner::getWork(TaskContext **reawaken, TaskHandle **create) {
     // FIXME---this is very coarse locking indeed!
+    *reawaken = NULL;
+    *create = NULL;
     AutoLock holdM(_threadPool->masterLock());
     while (true) {
         if (!_toReawaken.empty()) {
