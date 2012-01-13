@@ -14,7 +14,7 @@
  * for the specific language governing rights and limitations under the
  * License.
  *
- * The Original Code is JavaScript shell workers.
+ * The Original Code is the Spork project.
  *
  * The Initial Developer of the Original Code is
  * Mozilla Corporation.
@@ -22,7 +22,8 @@
  * the Initial Developer. All Rights Reserved.
  *
  * Contributor(s):
- *   Jason Orendorff <jorendorff@mozilla.com>
+ *   Nicholas Matsakis <nmatsakis@mozilla.com>
+ *   Donovan Preston <dpreston@mozilla.com>
  *
  * Alternatively, the contents of this file may be used under the terms of
  * either of the GNU General Public License Version 2 or later (the "GPL"),
