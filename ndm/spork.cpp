@@ -189,6 +189,21 @@ void delete_assoc(JSContext *cx, JSObject *obj) {
     delete t;
 }
 
+class CrossCompartment
+{
+private:
+    JSCrossCompartmentCall *cc;
+
+public:
+    CrossCompartment(JSContext *cx, JSObject *obj) {
+        cc = JS_EnterCrossCompartmentCall(cx, obj);
+    }
+
+    ~CrossCompartment() {
+        JS_LeaveCrossCompartmentCall(cc);
+    }
+};
+
 // ____________________________________________________________
 // TaskHandle interface
 
@@ -468,12 +483,16 @@ JSBool fork(JSContext *cx, uintN argc, jsval *vp) {
         return JS_FALSE;
 
     int length = JS_GetStringEncodingLength(cx, str);
-    char *encoded = check_null(new char[length]);
-    JS_EncodeStringToBuffer(str, encoded, length);
+    char *encoded = check_null(new char[length+4]);
+    JS_EncodeStringToBuffer(str, encoded+1, length);
+    encoded[0] = '(';
+    encoded[length+1] = ')';
+    encoded[length+2] = '(';
+    encoded[length+3] = ')';
     ChildTaskHandle *th = ChildTaskHandle::create(cx, taskContext, encoded);
     JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(th->object()));
 
-    //taskContext->addTaskToFork(th);
+    taskContext->addTaskToFork(th);
     return JS_TRUE;
 }
 
@@ -522,6 +541,8 @@ void RootTaskHandle::onCompleted(Runner *runner) {
 }
 
 JSBool RootTaskHandle::execute(JSContext *cx, JSObject *global) {
+    CrossCompartment cc(cx, global);
+
     JSScript *scr = JS_CompileUTF8File(cx, global, scriptfn);
     if (scr == NULL)
         return 0;
@@ -541,6 +562,16 @@ void ChildTaskHandle::onCompleted(Runner *runner) {
 }
 
 JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *global) {
+    CrossCompartment cc(cx, global);
+
+    jsval rval;
+    if (!JS_EvaluateScript(cx, global, _toExec, strlen(_toExec),
+                           "fork", 1, &rval))
+        return  0;
+
+    if (JSVAL_IS_NULL(rval))
+        return 0;
+
     return 1;
 }
 
@@ -685,6 +716,8 @@ TaskContext *Runner::createTaskContext(TaskHandle *handle) {
         /*JSContext *cx: */ _cx, 
         /*JSClass *clasp: */ &Global::jsClass,
         /*JSPrincipals*/ NULL);
+
+    CrossCompartment cc(_cx, global);
 
     if (!JS_InitStandardClasses(_cx, global))
         return NULL;
