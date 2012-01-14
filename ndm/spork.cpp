@@ -312,6 +312,7 @@ private:
         , _nbytes(0)
     {
         JS_SetPrivate(cx, _object, this);
+        JS_SetReservedSlot(cx, _object, ResultSlot, JSVAL_NULL);
     }
 
     void clearResult();
