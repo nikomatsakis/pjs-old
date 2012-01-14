@@ -162,13 +162,11 @@ namespace spork {
  * Garbage collection
  * ------------------
  * 
- * The GC strategy is as follows: each active TaskContext is
- * "self-rooted", which means that the C++ object adds the
- * corresponding JS object to the root set.  This is true up until
- * the TaskContext completes, at which point the C++ object removes
- * itself from the root set.
- * 
- * Each TaskContext will therefore keep its parent TaskContext
+ * The GC strategy is as follows: each active TaskHandle and
+ * TaskContext is "self-rooted", which means that the C++ object adds
+ * the corresponding JS object to the root set.  This is true up until
+ * the TaskContext completes, at which point both C++ objects remove
+ * themselves from the root set.  Either may still be live.
  *
  * Future improvements
  * -------------------
@@ -181,13 +179,28 @@ namespace spork {
  * for this and don't want to implement it at the moment anyhow.
  *
  * Here is a proposal for the protocol:
- * - You have a shared counter on the thread pool, guarded by a lock (for
- *   now).
- * - The counter initially 0,
- *   but set to MAX_INT when there are idle 
- * - Whenever a a new task is pushed, the thread examines
- *   the counter: if it is < MAX_INT, 
- *   increments the counter.
+ * - You have a shared 64bit counter on the thread pool, guarded by a lock (for
+ *   now).  Counter initially 0.  If it is MAX_ULONG-1, that means that
+ *   runners are idle and blocked.  If it is MAX_ULONG, that means to shutdown.
+ * - Each runner executes in a loop:
+ *   - Check for contexts to reawaken
+ *   - Check for local work
+ *   - Acquire global lock and read value of counter:
+ *     - if MAX_ULONG-1, become idle (no work)
+ *     - if MAX_ULONG, exit
+ *     - otherwise, remember value and release lock
+ *   - Search for work to steal
+ *   - If unsuccessful, acquire global and read value of counter:
+ *     - if MAX_ULONG-1, become idle (no work)
+ *     - if MAX_ULONG, exit
+ *     - if still the same as before, set to MAX_ULONG-1 and become idle
+ *
+ * When producing new work or reawakening:
+ *   - Acquire global lock and check value of counter
+ *     - if MAX_ULONG-1, pulse the monitor and set counter to 0
+ *     - else, increment counter, rolling over if we reach MAX_ULONG-1
+ *
+ * This global lock could be rephrased in terms of a compare-and-swap.
  ************************************************************/
 
 class ThreadPool;
