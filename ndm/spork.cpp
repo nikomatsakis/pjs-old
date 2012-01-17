@@ -180,27 +180,32 @@ namespace spork {
  *
  * Here is a proposal for the protocol:
  * - You have a shared 64bit counter on the thread pool, guarded by a lock (for
- *   now).  Counter initially 0.  If it is MAX_ULONG-1, that means that
- *   runners are idle and blocked.  If it is MAX_ULONG, that means to shutdown.
+ *   now).  Counter initially 2.  If it is 0, that means that
+ *   runners are idle and blocked.  If it is 1, that means to shutdown.
  * - Each runner executes in a loop:
  *   - Check for contexts to reawaken
  *   - Check for local work
- *   - Acquire global lock and read value of counter:
- *     - if MAX_ULONG-1, become idle (no work)
- *     - if MAX_ULONG, exit
- *     - otherwise, remember value and release lock
- *   - Search for work to steal
+ *   - Read value of counter (no lock needed on x86)
+ *   - If counter is 1, end.
+ *   - If counter is not 0, search for work to steal
  *   - If unsuccessful, acquire global and read value of counter:
- *     - if MAX_ULONG-1, become idle (no work)
- *     - if MAX_ULONG, exit
- *     - if still the same as before, set to MAX_ULONG-1 and become idle
+ *     - if 0, become idle (no work)
+ *     - if 1, exit
+ *     - if still the same as before, set to 0 and become idle
  *
- * When producing new work or reawakening:
+ * After producing new work or reawakening someone:
  *   - Acquire global lock and check value of counter
  *     - if MAX_ULONG-1, pulse the monitor and set counter to 0
- *     - else, increment counter, rolling over if we reach MAX_ULONG-1
+ *     - else, increment counter, jump up to 2 if we roll over
  *
- * This global lock could be rephrased in terms of a compare-and-swap.
+ * This has one potential (but I think exceedingly unlikely) failure
+ * mode: if I read the counter, scan for work, and then sleep for a
+ * long time, it's possible that while I am sleeping the counter is
+ * incremented 2^64 times and it rolls over back to the same value I
+ * read.  Then I will go to sleep.  If no more tasks are ever
+ * produced, I might never wake up: but note that other runners (e.g.,
+ * the one that produced the 2^64 work items) are still active, so all
+ * that happens is we get less parallelism than we otherwise would.
  ************************************************************/
 
 class ThreadPool;
@@ -246,6 +251,38 @@ public:
     ~CrossCompartment() {
         JS_LeaveCrossCompartmentCall(cc);
     }
+};
+
+// ____________________________________________________________
+// TaskSpec
+
+class ClonedObj {
+private:
+    uint64_t *_data;
+    size_t _nbytes;
+    ClonedObj(uint64_t *data, size_t nbytes)
+        : _data(data)
+        , _nbytes(nbytes)
+    {}
+public:
+    ~ClonedObj();
+    static JSBool pack(JSContext *cx, jsval val, ClonedObj **rval);
+    JSBool unpack(JSContext *cx, jsval *rval);
+};
+
+class TaskSpec {
+private:
+    ClonedObj **_args;
+    char *_fntext;
+    
+    TaskSpec(ClonedObj **args, char *fntext)
+        : _args(args)
+        , _fntext(fntext)
+    {}
+public:
+    static JSBool create(JSContext *cx, jsval fnval,
+                         jsval *argvals, int argcnt);
+    ~TaskSpec();
 };
 
 // ____________________________________________________________
@@ -295,9 +332,10 @@ private:
     TaskContext *_parent;
     int _generation;
     JSObject *_object;
+
     char *_funcStr;
-    uint64_t *_result;
-    size_t _nbytes;
+
+    ClonedObj *_result;
 
     JSBool addRoot(JSContext *cx);
     JSBool delRoot(JSContext *cx);
@@ -309,7 +347,6 @@ private:
         , _object(object)
         , _funcStr(toExec)
         , _result(NULL)
-        , _nbytes(0)
     {
         JS_SetPrivate(cx, _object, this);
         JS_SetReservedSlot(cx, _object, ResultSlot, JSVAL_NULL);
@@ -556,6 +593,7 @@ JSBool print(JSContext *cx, uintN argc, jsval *vp) {
 
 JSBool fork(JSContext *cx, uintN argc, jsval *vp) {
     TaskContext *taskContext = (TaskContext*) JS_GetContextPrivate(cx);
+
     JSString *str;
     if (!JS_ConvertArguments(cx, argc, JS_ARGV(cx, vp), "S", &str))
         return JS_FALSE;
@@ -566,6 +604,7 @@ JSBool fork(JSContext *cx, uintN argc, jsval *vp) {
     encoded[0] = '(';
     encoded[length+1] = ')';
     encoded[length+2] = 0;
+
     ChildTaskHandle *th = ChildTaskHandle::create(cx, taskContext, encoded);
     JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(th->object()));
 
@@ -623,6 +662,30 @@ JSClass Global::jsClass = {
 };
 
 // ______________________________________________________________________
+// 
+
+ClonedObj::~ClonedObj() {
+    js::Foreground::free_(_data);
+}
+
+JSBool ClonedObj::pack(JSContext *cx, jsval val, ClonedObj **rval) {
+    uint64_t *data;
+    size_t nbytes;
+    if (!JS_WriteStructuredClone(cx, val, &data, &nbytes, NULL, NULL)) {
+        *rval = NULL;
+        return false;
+    }
+    *rval = new ClonedObj(data, nbytes);
+    return true;
+}
+
+JSBool ClonedObj::unpack(JSContext *cx, jsval *rval) {
+    return JS_ReadStructuredClone(cx, _data, _nbytes, 
+                                  JS_STRUCTURED_CLONE_VERSION, rval,
+                                  NULL, NULL);
+}
+
+// ______________________________________________________________________
 // TaskHandle impl
 
 JSClass ChildTaskHandle::jsClass = {
@@ -646,9 +709,7 @@ JSBool RootTaskHandle::execute(JSContext *cx, JSObject *taskctx,
 }
 
 void ChildTaskHandle::onCompleted(Runner *runner, jsval result) {
-    // Clone the result:
-    JS_WriteStructuredClone(runner->cx(), result, &_result, &_nbytes,
-                            NULL, NULL);
+    ClonedObj::pack(runner->cx(), result, &_result);
     _parent->onChildCompleted();
     delRoot(runner->cx());
 }
@@ -660,8 +721,8 @@ JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *taskctx,
                            "fork", 1, &fnval))
         return  0;
 
-    jsval args[] = { OBJECT_TO_JSVAL(taskctx) };
-    return JS_CallFunctionValue(cx, global, fnval, 1, args, rval);
+    JSBool result = JS_CallFunctionValue(cx, global, fnval, 0, NULL, rval);
+    return result;
 }
 
 ChildTaskHandle *ChildTaskHandle::create(JSContext *cx,
@@ -682,29 +743,25 @@ ChildTaskHandle *ChildTaskHandle::create(JSContext *cx,
 
 void ChildTaskHandle::clearResult() {
     if (_result) {
-        js::Foreground::free_(_result);
+        delete _result;
         _result = 0;
-        _nbytes = 0;
     }
 }
 
 JSBool ChildTaskHandle::GetResult(JSContext *cx,
                                   jsval *rval)
 {
-    if (_result != NULL) {
-        jsval decloned;
-        if (!JS_ReadStructuredClone(cx, _result, _nbytes, 
-                                    JS_STRUCTURED_CLONE_VERSION, &decloned,
-                                    NULL, NULL))
-            return false;
-        clearResult();
-
-        JS_SetReservedSlot(cx, _object, ResultSlot, decloned);
-    }
-
     if (!_parent->generationReady(_generation)) {
         JS_ReportError(cx, "all child tasks not yet completed");
         return false;
+    }
+
+    if (_result != NULL) {
+        jsval decloned;
+        if (!_result->unpack(cx, &decloned))
+            return false;
+        clearResult();
+        JS_SetReservedSlot(cx, _object, ResultSlot, decloned);
     }
 
     return JS_GetReservedSlot(cx, _object, ResultSlot, rval);
