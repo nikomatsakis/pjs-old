@@ -444,19 +444,7 @@ public:
 
 class Global MOZ_FINAL
 {
-private:
-    JSObject *_object;
-
-    static void jsFinalize(JSContext *cx, JSObject *obj) {
-        delete_assoc<Global>(cx, obj);
-    }
-
-    Global(JSObject *anObject)
-      : _object(anObject)
-    {}
-
 public:
-
     static JSClass jsClass;
 };
 
@@ -665,7 +653,7 @@ static JSFunctionSpec sporkGlobalFunctions[] = {
 JSClass Global::jsClass = {
     "Global", JSCLASS_GLOBAL_FLAGS,
     JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
-    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, Global::jsFinalize,
+    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, JS_FinalizeStub,
     JSCLASS_NO_OPTIONAL_MEMBERS
 };
 
@@ -807,11 +795,18 @@ TaskContext *TaskContext::create(JSContext *cx,
 }
 
 JSBool TaskContext::addRoot(JSContext *cx) {
-    return JS_AddNamedObjectRoot(cx, &_object, "TaskContext::addRoot()");
+    if (!JS_AddNamedObjectRoot(cx, &_object, "TaskContext::_object"))
+        return false;
+    if (!JS_AddNamedObjectRoot(cx, &_global, "TaskContext::_global")) {
+        JS_RemoveObjectRoot(cx, &_object);
+        return false;
+    }
+    return true;
 }
 
 JSBool TaskContext::delRoot(JSContext *cx) {
-    return JS_RemoveObjectRoot(cx, &_object);
+    JS_RemoveObjectRoot(cx, &_object);
+    JS_RemoveObjectRoot(cx, &_global);
 }
 
 void TaskContext::addTaskToFork(TaskHandle *th) {
