@@ -1,0 +1,24 @@
+#!/bin/bash
+DIR=$PWD/$(dirname $0)
+hg clone http://hg.mozilla.org/mozilla-central $DIR/mozilla-central
+
+mkdir -p $DIR/install
+
+mkdir -p $DIR/mozilla-central/nsprpub/build-spork
+cd $DIR/mozilla-central/nsprpub/build-spork
+../configure --enable-debug --enable-64bit --prefix="$DIR/install"
+make
+make install
+
+cd $DIR/mozilla-central/js/src
+autoconf213 || autoconf-2.13
+mkdir -p build-spork
+cd build-spork
+../configure --enable-debug --disable-optimize --enable-threadsafe --with-system-nspr --with-nspr-prefix=$DIR/install --prefix="$DIR/install"
+make
+make install
+
+# Sadly, make install for js seems to be pretty messed up.
+cd $DIR/install/include
+rm -rf js
+ln -s $DIR/mozilla-central/js/src/build-spork/dist/include js

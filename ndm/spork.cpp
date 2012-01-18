@@ -39,18 +39,16 @@
  *
  * ***** END LICENSE BLOCK ***** */
 
-#include "mozilla/Attributes.h"
-
 #include <string.h>
 #include <pthread.h>
-#include "prthread.h"
-#include "prlock.h"
-#include "prcvar.h"
-#include "jsapi.h"
-#include "jscntxt.h"
-#include "jsdbgapi.h"
-#include "jsstdint.h"
-#include "jslock.h"
+#include <nspr/prthread.h>
+#include <nspr/prlock.h>
+#include <nspr/prcvar.h>
+#include <js/jsapi.h>
+#include <js/jscntxt.h>
+#include <js/jsdbgapi.h>
+#include <js/jsstdint.h>
+#include <js/jslock.h>
 
 extern size_t gMaxStackSize;
 
@@ -288,7 +286,7 @@ public:
 // ____________________________________________________________
 // TaskHandle interface
 
-class TaskHandle MOZ_FINAL
+class TaskHandle
 {
 private:
     TaskHandle(const TaskHandle &) MOZ_DELETE;
@@ -378,7 +376,7 @@ public:
 // ______________________________________________________________________
 // TaskContext interface
 
-class TaskContext MOZ_FINAL
+class TaskContext
 {
 public:
     enum TaskContextSlots { OnCompletionSlot, ResultSlot, MaxSlot };
@@ -442,7 +440,7 @@ public:
 // ____________________________________________________________
 // Global interface
 
-class Global MOZ_FINAL
+class Global
 {
 public:
     static JSClass jsClass;
@@ -451,7 +449,7 @@ public:
 // ____________________________________________________________
 // Runner interface
 
-class Runner MOZ_FINAL
+class Runner
 {
 private:
     ThreadPool *_threadPool;
@@ -496,7 +494,7 @@ public:
     void terminate();
 };
 
-class ThreadPool MOZ_FINAL
+class ThreadPool
 {
 private:
     int32_t _terminating;
