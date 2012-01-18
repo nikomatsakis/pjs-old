@@ -9,7 +9,8 @@ all: ${BUILD}/spork TAGS
 build-dir:
 	mkdir -p ${BUILD}
 
-${BUILD}/mozilla-central.loc: build-dir
+${BUILD}/mozilla-central.loc:
+	mkdir -p ${BUILD}
 	./checkout-and-build-mozilla-central
 	touch ${BUILD}/mozilla-central.loc
 

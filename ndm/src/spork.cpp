@@ -45,9 +45,6 @@
 #include <nspr/prlock.h>
 #include <nspr/prcvar.h>
 #include <js/jsapi.h>
-#include <js/jscntxt.h>
-#include <js/jsdbgapi.h>
-#include <js/jsstdint.h>
 #include <js/jslock.h>
 
 extern size_t gMaxStackSize;
