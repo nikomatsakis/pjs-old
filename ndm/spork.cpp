@@ -43,6 +43,8 @@
 
 #include <string.h>
 #include <pthread.h>
+#include <deque>
+#include <assert.h>
 #include "prthread.h"
 #include "prlock.h"
 #include "prcvar.h"
@@ -457,19 +459,21 @@ private:
     ThreadPool *_threadPool;
     int _index;
     TaskContextVec _toReawaken;
+    std::deque<TaskHandle*> _toCreate;
     JSLock *_runnerLock;
-    PRCondVar *_runnerCondVar;
     JSRuntime *_rt;
     JSContext *_cx;
     
     bool getWork(TaskContext **reawaken, TaskHandle **create);
+    bool getLocalWork(TaskContext **reawaken, TaskHandle **create);
+    bool getStolenWork(TaskHandle **create);
+    bool steal(TaskHandle **create);
 
     Runner(ThreadPool *aThreadPool, int anIndex,
-           JSRuntime *aRt, JSContext *aCx)
+           JSLock *runnerLock, JSRuntime *aRt, JSContext *aCx)
       : _threadPool(aThreadPool)
       , _index(anIndex)
-      , _runnerLock(JS_NEW_LOCK())
-      , _runnerCondVar(JS_NEW_CONDVAR(_runnerLock))
+      , _runnerLock(runnerLock)
       , _rt(aRt)
       , _cx(aCx)
     {
@@ -480,8 +484,6 @@ public:
     static Runner *create(ThreadPool *aThreadPool, int anIndex);
 
     ~Runner() {
-        if (_runnerCondVar)
-            JS_DESTROY_CONDVAR(_runnerCondVar);
         if (_runnerLock)
             JS_DESTROY_LOCK(_runnerLock);
     }
@@ -496,16 +498,24 @@ public:
     void terminate();
 };
 
+// ______________________________________________________________________
+// ThreadPool inter
+
+typedef unsigned long wc_t;
+
 class ThreadPool MOZ_FINAL
 {
 private:
-    int32_t _terminating;
+    const static wc_t wc_terminate = 0;
+    const static wc_t wc_idle = 1;
+    const static wc_t wc_rollover = 2;
+
+    volatile wc_t _workCounter; 
     JSLock *_masterLock;
     PRCondVar *_masterCondVar;
     int _threadCount;
     PRThread **_threads;
     Runner **_runners;
-    Vector<TaskHandle*, 4, SystemAllocPolicy> _toCreate;
 
     static void start(void* arg) {
         ((Runner*) arg)->start();
@@ -513,7 +523,7 @@ private:
 
     explicit ThreadPool(JSLock *aLock, PRCondVar *aCondVar,
                         int threadCount, PRThread **threads, Runner **runners)
-      : _terminating(0)
+      : _workCounter(wc_rollover)
       , _masterLock(aLock)
       , _masterCondVar(aCondVar)
       , _threadCount(threadCount)
@@ -532,16 +542,18 @@ public:
         delete[] _runners;
     }
 
-    JSLock *masterLock() { return _masterLock; }
-    PRCondVar *masterCondVar() { return _masterCondVar; }
-    TaskHandleVec *toCreate() { return &_toCreate; }
-
     void start(RootTaskHandle *rth);
+
+    wc_t readWorkCounter();
+    bool waitTillAllRunnersAreCreated(int runnerId);
+    bool waitTillWorkIsProduced(int runnerId, wc_t sinceWorkCounter);
+    void notifyWorkProduced();
+
+    Runner **getRunners(int *runner_count);
 
     static ThreadPool *create();
     void terminate();
     void shutdown();
-    int terminating() { return _terminating; }
 };
 
 // ______________________________________________________________________
@@ -888,6 +900,7 @@ JSClass TaskContext::jsClass = {
 Runner *Runner::create(ThreadPool *aThreadPool, int anIndex) {
     JSRuntime *rt = check_null(JS_NewRuntime(1L * 1024L * 1024L));
     JSContext *cx = check_null(JS_NewContext(rt, 8192));
+    JSLock *lock = check_null(JS_NEW_LOCK());
     JS_SetOptions(cx, JSOPTION_VAROBJFIX | JSOPTION_METHODJIT);
     JS_SetVersion(cx, JSVERSION_LATEST);
     JS_SetErrorReporter(cx, reportError);
@@ -895,44 +908,91 @@ Runner *Runner::create(ThreadPool *aThreadPool, int anIndex) {
     JS_ClearRuntimeThread(rt);
     if(getenv("SPORK_ZEAL") != NULL)
         JS_SetGCZeal(cx, 2, 1, false);
-    return new Runner(aThreadPool, anIndex, rt, cx);
+    return new Runner(aThreadPool, anIndex, lock, rt, cx);
+}
+
+bool Runner::getLocalWork(TaskContext **reawaken, TaskHandle **create) {
+    AutoLock hold(_runnerLock);
+
+    // Executed only from the thread of this runner
+
+    fprintf(stderr, "runner %d getLocalWork toReawaken=%d toCreate=%d\n",
+            _index, _toReawaken.empty(), _toCreate.empty());
+
+    if (!_toReawaken.empty()) {
+        *reawaken = _toReawaken.popCopy();
+        return true;
+    }
+
+    if (!_toCreate.empty()) {
+        *create = _toCreate.front();
+        _toCreate.pop_front();
+        return true;
+    }
+
+    return false;
+}
+
+bool Runner::steal(TaskHandle **create) {
+    AutoLock hold(_runnerLock);
+    
+    // Executed only from the thread of another runner
+
+    if (!_toCreate.empty()) {
+        *create = _toCreate.back();
+        _toCreate.pop_back();
+        return true;
+    }
+
+    return false;
+}
+
+bool Runner::getStolenWork(TaskHandle **create) {
+    int c;
+    Runner **runners = _threadPool->getRunners(&c);
+    for (int i = _index + 1; i < c; i++)
+        if (runners[i]->steal(create))
+            return true;
+    for (int i = 0; i < _index; i++)
+        if (runners[i]->steal(create))
+            return true;
+    return false;
 }
 
 bool Runner::getWork(TaskContext **reawaken, TaskHandle **create) {
-    // FIXME---this is very coarse locking indeed!
+    wc_t workCounter;
     *reawaken = NULL;
     *create = NULL;
-    AutoLock holdM(_threadPool->masterLock());
-    while (true) {
-        if (!_toReawaken.empty()) {
-            *reawaken = _toReawaken.popCopy();
+    do {
+        fprintf(stderr, "runner %d searching for work\n", _index);
+        workCounter = _threadPool->readWorkCounter();
+        if (getLocalWork(reawaken, create))
             return true;
-        }
-            
-        if (_threadPool->terminating())
-            return false;
-
-        if (!_threadPool->toCreate()->empty()) {
-            *create = _threadPool->toCreate()->popCopy();
+        if (getStolenWork(create))
             return true;
-        }
-
-        JS_WAIT_CONDVAR(_threadPool->masterCondVar(), JS_NO_TIMEOUT);
-    }
+    } while (_threadPool->waitTillWorkIsProduced(_index, workCounter));
+    return false;
 }
 
 void Runner::reawaken(TaskContext *ctx) {
-    AutoLock holdM(_threadPool->masterLock());
-    _toReawaken.append(ctx);
-    JS_NOTIFY_ALL_CONDVAR(_threadPool->masterCondVar());
+    fprintf(stderr, "runner %d reawaken:%p\n", _index, ctx);
+
+    {
+        AutoLock hold(_runnerLock);
+        _toReawaken.append(ctx);
+    }
+
+    _threadPool->notifyWorkProduced(); // FIXME---only necc. if this is idle
 }
 
 void Runner::enqueueTasks(TaskHandle **begin, TaskHandle **end) {
-    AutoLock holdM(_threadPool->masterLock());
-    if (!_threadPool->toCreate()->append(begin, end)) {
-        check_null((void*)NULL);
+    {
+        AutoLock hold(_runnerLock);
+        for (TaskHandle **p = begin; p != end; p++)
+            _toCreate.push_front(*p);
     }
-    JS_NOTIFY_ALL_CONDVAR(_threadPool->masterCondVar());
+
+    _threadPool->notifyWorkProduced();
 }
 
 void Runner::start() {
@@ -940,8 +1000,14 @@ void Runner::start() {
     TaskHandle *create = NULL;
     JS_SetRuntimeThread(_rt);
     JS_SetContextThread(_cx);
+
+    // first thing we do is block for the first item of "work"
+    _threadPool->waitTillAllRunnersAreCreated(_index);
+
     while (getWork(&reawaken, &create)) {
         JS_BeginRequest(_cx);
+        fprintf(stderr, "runner %d got work reawaken=%p create=%p\n", 
+                _index, reawaken, create);
         if (reawaken) {
             reawaken->resume(this);
         }
@@ -1011,20 +1077,22 @@ ThreadPool *ThreadPool::create() {
         check_null(threads[i]);
     }
 
+    // this will cause the workers to actually enter the main loop
+    tp->notifyWorkProduced();
+
     return tp;
 }
 
 void ThreadPool::start(RootTaskHandle *rth) {
-    AutoLock hold(_masterLock);
-    if (!_toCreate.append(rth)) {
-        check_null((void*)NULL);
-    }
-    JS_NOTIFY_ALL_CONDVAR(_masterCondVar);
+    TaskHandle *th = rth;
+    TaskHandle **first = &th;
+    _runners[0]->enqueueTasks(first, first+1);
 }
 
 void ThreadPool::terminate() {
     AutoLock hold(_masterLock);
-    _terminating = 1;
+    fprintf(stderr, "ThreadPool::terminate()\n");
+    _workCounter = wc_terminate;
     JS_NOTIFY_ALL_CONDVAR(_masterCondVar);
 }
 
@@ -1035,6 +1103,60 @@ void ThreadPool::shutdown() {
             _threads[i] = NULL;
         }
     }
+}
+
+wc_t ThreadPool::readWorkCounter() {
+    return _workCounter;
+}
+
+Runner **ThreadPool::getRunners(int *runner_count) {
+    *runner_count = _threadCount;
+    return _runners;
+}
+
+void ThreadPool::notifyWorkProduced() {
+    AutoLock hold(_masterLock);
+    wc_t wc = _workCounter;
+    assert (wc != wc_terminate);
+    if (wc == wc_idle) {
+        _workCounter = wc_rollover;
+        JS_NOTIFY_ALL_CONDVAR(_masterCondVar);
+    } else {
+        wc_t next_wc = wc + 1;
+        if (next_wc == 0)
+            _workCounter = wc_rollover;
+        else
+            _workCounter = next_wc;
+    }
+    fprintf(stderr, "notifyWorkProduced() wc=%u _workCounter=%u\n",
+            wc, _workCounter);
+}
+
+bool ThreadPool::waitTillAllRunnersAreCreated(int runnerId) {
+    waitTillWorkIsProduced(runnerId, wc_rollover);
+}
+
+bool ThreadPool::waitTillWorkIsProduced(int runnerId, wc_t sinceWorkCounter) {
+    AutoLock hold(_masterLock);
+
+    fprintf(stderr, "waitTillWorkIsProduced(%d, %lu) _workCounter=%lu\n",
+            runnerId, sinceWorkCounter, _workCounter);
+
+    if (_workCounter > sinceWorkCounter)
+        return true;
+
+    if (sinceWorkCounter == wc_terminate)
+        return false;
+
+    if (_workCounter == sinceWorkCounter)
+        _workCounter = wc_idle;
+
+    while (_workCounter == wc_idle) {
+        fprintf(stderr, "  runner %d going idle\n", runnerId);
+        JS_WAIT_CONDVAR(_masterCondVar, JS_NO_TIMEOUT);
+    }
+
+    return (_workCounter != wc_terminate);
 }
 
 // ______________________________________________________________________
