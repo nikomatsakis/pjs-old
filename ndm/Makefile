@@ -22,8 +22,10 @@ ${BUILD}/%.o: ${SRC}/%.cpp ${BUILD}/mozilla-central.loc build-dir
 		-o $@ -c $<
 
 ${BUILD}/spork: ${BUILD}/spork.o ${BUILD}/main.o build-dir
-	g++ -m64 -L ${INSTALL}/lib -lmozjs -lnspr4 \
-		-o $@ ${BUILD}/main.o ${BUILD}/spork.o
+	g++ -m64 \
+		-o $@ ${BUILD}/main.o ${BUILD}/spork.o \
+			${INSTALL}/lib/libjs_static.a \
+			${INSTALL}/lib/libnspr4.a
 
 TAGS: ${BUILD}/mozilla-central.loc
 	ctags -e -f TAGS.emacs -R ${SRC} \
