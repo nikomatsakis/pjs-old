@@ -1,27 +1,31 @@
 SRC=./src
-INSTALL=./install
 BUILD=./build
+INSTALL=./build/install
 MOZCENTRAL=./mozilla-central
 .PHONY : all TAGS clean cleaner build-dir
 
-all: ${BUILD}/spork TAGS
+all: TAGS ${BUILD}/spork
 
 build-dir:
 	mkdir -p ${BUILD}
 
-${BUILD}/mozilla-central.loc:
-	mkdir -p ${BUILD}
-	./checkout-and-build-mozilla-central
-	touch ${BUILD}/mozilla-central.loc
+.MC.loc:
+	./checkout-mozilla-central
 
-${BUILD}/%.o: ${SRC}/%.cpp ${BUILD}/mozilla-central.loc build-dir
+${BUILD}/MC: .MC.loc build-dir
+	./build-mozilla-central
+
+${BUILD}/%.o: ${SRC}/%.cpp ${BUILD}/MC
 	g++ -DDEBUG -g -w -m64 \
 		-I ${INSTALL}/include \
 		-I ${INSTALL}/include/js \
 		-I ${INSTALL}/include/nspr \
 		-o $@ -c $<
 
-${BUILD}/spork: ${BUILD}/spork.o ${BUILD}/main.o build-dir
+${BUILD}/spork: \
+		${BUILD}/spork.o \
+		${BUILD}/main.o \
+		${BUILD}/MC
 	g++ -m64 \
 		-o $@ ${BUILD}/main.o ${BUILD}/spork.o \
 			${INSTALL}/lib/libjs_static.a \
@@ -34,10 +38,8 @@ TAGS: ${BUILD}/mozilla-central.loc
 		${MOZCENTRAL}/mfbt
 
 clean:
-	rm -rf ${BUILD}/*
-	rm -rf ${INSTALL}
+	rm -rf ${BUILD}
 	rm TAGS.emacs
-	find mozilla-central -name "build-spork" | xargs rm -rf
 
 cleaner: clean
 	rm -rf mozilla-central
