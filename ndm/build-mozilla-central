@@ -22,4 +22,4 @@ make install
 mv ${INSTALL}/include/js ${INSTALL}/include/js.1
 ln -s ${BUILD}/js/dist/include ${INSTALL}/include/js
 
-touch ${BUILD}/MC.build
+touch ${BUILD}/MC
