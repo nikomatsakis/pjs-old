@@ -294,14 +294,16 @@ public:
 class Closure {
 private:
     char *_text;
-    jsval *_argv;
+    ClonedObj **_argv;
     uintN _argc;
 
-    Closure(char *text, jsval *argv, int argc)
+    Closure(char *text, ClonedObj **argv, uintN argc)
         : _text(text)
         , _argv(argv)
         , _argc(argc)
     {}
+
+    static void del(char *encoded, ClonedObj **argv, int argc);
 
 public:
     ~Closure();
@@ -736,24 +738,53 @@ Closure *Closure::create(JSContext *cx, JSString *str,
     encoded[length+1] = ')';
     encoded[length+2] = 0;
 
-    jsval *argv1 = check_null(new jsval[argc]);
-    memcpy(argv1, argv, sizeof(jsval) * argc);
+    ClonedObj **argv1 = new ClonedObj*[argc];
+    memset(argv1, 0, sizeof(ClonedObj*) * argc);
+
+    for (int i = 0; i < argc; i++) {
+        if (!ClonedObj::pack(cx, argv[i], argv1+i))
+            goto fail;
+    }
 
     return new Closure(encoded, argv1, argc);
+
+fail:
+    del(encoded, argv1, argc);
+    return NULL;
+}
+
+void
+Closure::del(char *encoded, ClonedObj **argv, int argc) {
+    delete[] encoded;
+    for (int i = 0; i < argc; i++) {
+        if (argv[i])
+            delete argv[i];
+    }
+    delete[] argv;
 }
 
 Closure::~Closure() {
-    delete[] _text;
-    delete[] _argv;
+    del(_text, _argv, _argc);
 }
 
 JSBool Closure::execute(JSContext *cx, JSObject *global, jsval *rval) {
     jsval fnval;
     if (!JS_EvaluateScript(cx, global, _text, strlen(_text),
                            "fork", 1, &fnval))
-        return  0;
+        return JS_FALSE;
 
-    return JS_CallFunctionValue(cx, global, fnval, _argc, _argv, rval);
+    jsval *argv = new jsval[_argc];
+    for (int i = 0; i < _argc; i++) {
+        if (!_argv[i]->unpack(cx, argv+i)) {
+            goto fail;
+        }
+    }
+
+    return JS_CallFunctionValue(cx, global, fnval, _argc, argv, rval);
+
+fail:
+    if (argv) delete[] argv;
+    return JS_FALSE;
 }
 
 // ______________________________________________________________________
