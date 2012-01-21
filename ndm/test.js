@@ -1,8 +1,11 @@
 let i = 0;
 while (i < 100) {
     print("hi");
-    foo = fork(function(x) { print("in_fork 1"); return x; }, "22");
-    bar = fork(function() { print("in_fork 2"); return 23; });
+
+    map = { a: 22, b: 23 };
+
+    foo = fork(function(m) { print("in_fork 1"); return m.a; }, map);
+    bar = fork(function(m) { print("in_fork 2"); return m.b; }, map);
     oncompletion(function() {
         print("in_completion");
         print("result of foo: ");

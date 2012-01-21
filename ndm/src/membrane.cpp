@@ -184,4 +184,17 @@ bool Membrane::wrap(Value *vp) {
     return true;
 }
 
+bool Membrane::enter(JSContext *cx, JSObject *wrapper,
+                     jsid id, Action act, bool *bp)
+{
+    switch (act) {
+      case GET:
+        return true;  // allow GET operations
+      case SET:
+        return false; // prevent write operations
+      case CALL:
+        return false; // for now, prevent call operations
+    }
+}
+
 }
