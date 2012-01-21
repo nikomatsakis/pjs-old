@@ -68,13 +68,11 @@ namespace spork {
  *
  * Example usage:
  *
- *   let taskHandle = fork(function(taskCtx) {
- *       let foo = ...;
- *       taskCtx.setresult(foo);
+ *   let taskHandle = fork(function() {
+ *       return ...;
  *   });
- *   let tN = forkn(N, function(ctx) {
- *       let foo = ... ctx.idx ...;
- *       ctx.setresult(foo);
+ *   let tN = forkn(N, function(idx) {
+ *       return ... idx ...;
  *   });
  *   oncompletion(function() {
  *       t.get();
@@ -330,7 +328,7 @@ public:
     virtual ~TaskHandle() {}
 
     virtual JSBool execute(JSContext *cx, JSObject *taskctx,
-                           JSObject *global) = 0;
+                           JSObject *global, jsval *rval) = 0;
     virtual void onCompleted(Runner *runner, jsval result) = 0;
 };
 
@@ -344,7 +342,7 @@ public:
     {}
 
     virtual JSBool execute(JSContext *cx, JSObject *taskctx,
-                           JSObject *global);
+                           JSObject *global, jsval *rval);
     virtual void onCompleted(Runner *runner, jsval result);
 };
 
@@ -395,7 +393,7 @@ protected:
 public:
     JSBool GetResult(JSContext *cx, jsval *rval);
     virtual JSBool execute(JSContext *cx, JSObject *taskctx,
-                           JSObject *global);
+                           JSObject *global, jsval *rval);
     virtual void onCompleted(Runner *runner, jsval result);
 
     JSObject *object() { return _object; }
@@ -413,7 +411,7 @@ public:
 class TaskContext
 {
 public:
-    enum TaskContextSlots { OnCompletionSlot, ResultSlot, GenSlot, MaxSlot };
+    enum TaskContextSlots { OnCompletionSlot, GenSlot, MaxSlot };
 
 private:
     TaskHandle *_taskHandle;
@@ -433,7 +431,6 @@ private:
       , _runner(aRunner)
     {
         setOncompletion(cx, JSVAL_NULL);
-        setResult(cx, JSVAL_NULL);
         JS_SetPrivate(cx, _object, this);
     }
 
@@ -459,10 +456,6 @@ public:
 
     void setOncompletion(JSContext *cx, jsval val) {
         JS_SetReservedSlot(cx, _object, OnCompletionSlot, val);
-    }
-
-    void setResult(JSContext *cx, jsval val) {
-        JS_SetReservedSlot(cx, _object, ResultSlot, val);
     }
 
     static JSClass jsClass;
@@ -643,16 +636,9 @@ JSBool oncompletion(JSContext *cx, uintN argc, jsval *vp) {
     return JS_TRUE;
 }
 
-JSBool setresult(JSContext *cx, uintN argc, jsval *vp) {
-    TaskContext *taskContext = (TaskContext*) JS_GetContextPrivate(cx);
-    taskContext->setResult(cx, JS_ARGV(cx, vp)[0]);
-    return JS_TRUE;
-}
-
 static JSFunctionSpec sporkGlobalFunctions[] = {
     JS_FN("print", print, 0, 0),
     JS_FN("fork", fork, 1, 0),
-    JS_FN("setresult", setresult, 1, 0),
     JS_FN("oncompletion", oncompletion, 1, 0),
     JS_FS_END
 };
@@ -748,13 +734,12 @@ void RootTaskHandle::onCompleted(Runner *runner, jsval result) {
 }
 
 JSBool RootTaskHandle::execute(JSContext *cx, JSObject *taskctx,
-                               JSObject *global) {
+                               JSObject *global, jsval *rval) {
     JSScript *scr = JS_CompileUTF8File(cx, global, scriptfn);
     if (scr == NULL)
         return 0;
 
-    jsval rval;
-    return JS_ExecuteScript(cx, global, scr, &rval);
+    return JS_ExecuteScript(cx, global, scr, rval);
 }
 
 void ChildTaskHandle::onCompleted(Runner *runner, jsval result) {
@@ -764,15 +749,13 @@ void ChildTaskHandle::onCompleted(Runner *runner, jsval result) {
 }
 
 JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *taskctx,
-                                JSObject *global) {
+                                JSObject *global, jsval *rval) {
     jsval fnval;
     if (!JS_EvaluateScript(cx, global, _funcStr, strlen(_funcStr),
                            "fork", 1, &fnval))
         return  0;
 
-    jsval rval;
-    JSBool result = JS_CallFunctionValue(cx, global, fnval, 0, NULL, &rval);
-    return result;
+    return JS_CallFunctionValue(cx, global, fnval, 0, NULL, rval);
 }
 
 ChildTaskHandle *ChildTaskHandle::create(JSContext *cx,
@@ -945,25 +928,26 @@ JSBool TaskContext::newGeneration(JSContext *cx, bool *initialGeneration) {
 void TaskContext::resume(Runner *runner) {
     JSContext *cx = runner->cx();
     CrossCompartment cc(cx, _global);
-    jsval rval = JSVAL_NULL;
+    jsval rval;
 
     // If we break from this loop, this task context has completed,
     // either in error or successfully:
     while (true) {
+        rval = JSVAL_NULL;
+
         bool initialGeneration;
         if (!newGeneration(cx, &initialGeneration))
             break;
 
         JS_SetContextPrivate(cx, this);
         if (initialGeneration) {
-            if (!_taskHandle->execute(cx, _object, _global))
+            if (!_taskHandle->execute(cx, _object, _global, &rval))
                 break;
         } else {
             jsval fn;
             if (JS_GetReservedSlot(cx, _object, OnCompletionSlot, &fn)) {
                 setOncompletion(cx, JSVAL_NULL);
-                jsval ignored;
-                if (!JS_CallFunctionValue(cx, _global, fn, 0, NULL, &ignored))
+                if (!JS_CallFunctionValue(cx, _global, fn, 0, NULL, &rval))
                     break;
             } else {
                 break;
@@ -985,9 +969,7 @@ void TaskContext::resume(Runner *runner) {
             continue; // degenerate case: no tasks, just loop around
         }
         
-        // no _oncompletion handler is set, so we are done.  load the
-        // final result.
-        JS_GetReservedSlot(cx, _object, ResultSlot, &rval);
+        // no _oncompletion handler is set, so we are done.
         break;
     }
 
