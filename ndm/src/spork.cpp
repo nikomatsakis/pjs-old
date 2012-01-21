@@ -281,6 +281,26 @@ public:
 };
 
 // ____________________________________________________________
+// Generation interface
+
+class Generation {
+private:
+    enum { ReadySlot, MaxSlot };
+
+    Generation(); // cannot be constructed
+
+    static JSBool asGenObj(JSContext *cx, jsval genobj, JSObject **obj);
+
+public:
+    static JSBool create(JSContext *cx, jsval *rval);
+
+    static JSBool getReady(JSContext *cx, jsval genobj, JSBool *rval);
+    static JSBool setReady(JSContext *cx, jsval genobj, JSBool rval);
+
+    static JSClass jsClass;
+};
+
+// ____________________________________________________________
 // TaskHandle interface
 
 class TaskHandle
@@ -318,14 +338,13 @@ public:
 class ChildTaskHandle : public TaskHandle
 {
 private:
-    enum Reserved { ResultSlot, MaxSlot };
+    enum Reserved { ResultSlot, GenSlot, MaxSlot };
 
     static void jsFinalize(JSContext *cx, JSObject *obj) {
         delete_assoc<TaskHandle>(cx, obj);
     }
 
     TaskContext *_parent;
-    int _generation;
     JSObject *_object;
 
     char *_funcStr;
@@ -335,16 +354,16 @@ private:
     JSBool addRoot(JSContext *cx);
     JSBool delRoot(JSContext *cx);
 
-    explicit ChildTaskHandle(JSContext *cx, TaskContext *parent, int gen,
+    explicit ChildTaskHandle(JSContext *cx, TaskContext *parent, jsval gen,
                              JSObject *object, char *toExec)
         : _parent(parent)
-        , _generation(gen)
         , _object(object)
         , _funcStr(toExec)
         , _result(NULL)
     {
         JS_SetPrivate(cx, _object, this);
         JS_SetReservedSlot(cx, _object, ResultSlot, JSVAL_NULL);
+        JS_SetReservedSlot(cx, _object, GenSlot, gen);
     }
 
     void clearResult();
@@ -376,13 +395,12 @@ public:
 class TaskContext
 {
 public:
-    enum TaskContextSlots { OnCompletionSlot, ResultSlot, MaxSlot };
+    enum TaskContextSlots { OnCompletionSlot, ResultSlot, GenSlot, MaxSlot };
 
 private:
     TaskHandle *_taskHandle;
     JSObject *_global;
     JSObject *_object;
-    int _generation;
     jsrefcount _outstandingChildren;
     TaskHandleVec _toFork;
     Runner *_runner;
@@ -393,7 +411,6 @@ private:
       : _taskHandle(aTask)
       , _global(aGlobal)
       , _object(object)
-      , _generation(0)
       , _outstandingChildren(0)
       , _runner(aRunner)
     {
@@ -404,6 +421,7 @@ private:
 
     JSBool addRoot(JSContext *cx);
     JSBool delRoot(JSContext *cx);
+    JSBool newGeneration(JSContext *cx, bool *initialGeneration);
 
 public:
     static TaskContext *create(JSContext *cx,
@@ -417,10 +435,8 @@ public:
 
     void resume(Runner *runner);
 
-    int generation() { return _generation; }
-
-    int generationReady(int gen) {
-        return _generation > gen;
+    JSBool getGeneration(JSContext *cx, jsval *rval) {
+        return JS_GetReservedSlot(cx, _object, GenSlot, rval);
     }
 
     void setOncompletion(JSContext *cx, jsval val) {
@@ -653,6 +669,55 @@ JSClass Global::jsClass = {
 };
 
 // ______________________________________________________________________
+// Generation impl
+
+JSBool Generation::create(JSContext *cx, jsval *rval) {
+    JSObject *object = JS_NewObject(cx, &jsClass, NULL, NULL);
+    if (!object)
+        return NULL;
+
+    *rval = OBJECT_TO_JSVAL(object);
+    return setReady(cx, *rval, false);
+}
+
+JSBool Generation::asGenObj(JSContext *cx, jsval gen, JSObject **genobj) {
+    if (!JSVAL_IS_OBJECT(gen)) {
+        JS_ReportError(cx, "invalid generation object");
+        return false; // should not happen
+    }
+    *genobj = JSVAL_TO_OBJECT(gen);
+    if (JS_GET_CLASS(cx, *genobj) != &jsClass) {
+        JS_ReportError(cx, "invalid generation object");
+        return false; // should not happen
+    }
+    return true;
+}
+
+JSBool Generation::getReady(JSContext *cx, jsval gen, JSBool *rval) {
+    JSObject *genobj;
+    if (!asGenObj(cx, gen, &genobj))
+        return false;
+    jsval ready;
+    if (!JS_GetReservedSlot(cx, genobj, ReadySlot, &ready))
+        return false;
+    *rval = JSVAL_TO_BOOLEAN(ready);
+}
+
+JSBool Generation::setReady(JSContext *cx, jsval gen, JSBool rval) {
+    JSObject *genobj;
+    if (!asGenObj(cx, gen, &genobj))
+        return false;
+    return JS_SetReservedSlot(cx, genobj, ReadySlot, BOOLEAN_TO_JSVAL(rval));
+}
+
+JSClass Generation::jsClass = {
+    "Generation", JSCLASS_HAS_RESERVED_SLOTS(MaxSlot),
+    JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
+    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, JS_FinalizeStub,
+    JSCLASS_NO_OPTIONAL_MEMBERS
+};
+
+// ______________________________________________________________________
 // 
 
 ClonedObj::~ClonedObj() {
@@ -721,15 +786,17 @@ JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *taskctx,
 ChildTaskHandle *ChildTaskHandle::create(JSContext *cx,
                                          TaskContext *parent,
                                          char *toExec) {
+    jsval gen;
+    if (!parent->getGeneration(cx, &gen))
+        return NULL;
+    
     // To start, create the JS object representative:
     JSObject *object = JS_NewObject(cx, &jsClass, NULL, NULL);
-    if (!object) {
+    if (!object)
         return NULL;
-    }
-    
+
     // Create C++ object, which will be linked via Private:
-    ChildTaskHandle *th = new ChildTaskHandle(cx, parent, parent->generation(),
-                                              object, toExec);
+    ChildTaskHandle *th = new ChildTaskHandle(cx, parent, gen, object, toExec);
     th->addRoot(cx);
     return th;
 }
@@ -744,11 +811,19 @@ void ChildTaskHandle::clearResult() {
 JSBool ChildTaskHandle::GetResult(JSContext *cx,
                                   jsval *rval)
 {
-    if (!_parent->generationReady(_generation)) {
+    // Check if all tasks within generation have completely executed:
+    jsval gen;
+    if (!JS_GetReservedSlot(cx, _object, GenSlot, &gen))
+        return false;
+    JSBool ready;
+    if (!Generation::getReady(cx, gen, &ready))
+        return false;
+    if (!ready) {
         JS_ReportError(cx, "all child tasks not yet completed");
         return false;
     }
 
+    // Declone the result, if that is not already done:
     if (_result != NULL) {
         jsval decloned;
         if (!_result->unpack(cx, &decloned))
@@ -757,6 +832,7 @@ JSBool ChildTaskHandle::GetResult(JSContext *cx,
         JS_SetReservedSlot(cx, _object, ResultSlot, decloned);
     }
 
+    // Load the result:
     return JS_GetReservedSlot(cx, _object, ResultSlot, rval);
 }
 
@@ -780,7 +856,7 @@ TaskContext *TaskContext::create(JSContext *cx,
     if (!object) {
         return NULL;
     }
-    
+
     // Create C++ object, which will be linked via Private:
     TaskContext *tc = new TaskContext(cx, aTask, aRunner, aGlobal, object);
     if (!tc->addRoot(cx)) {
@@ -815,6 +891,25 @@ void TaskContext::onChildCompleted() {
     }
 }
 
+JSBool TaskContext::newGeneration(JSContext *cx, bool *initialGeneration) {
+    jsval gen;
+
+    // Set the current generation (if any) to be ready:
+    if (!JS_GetReservedSlot(cx, _object, GenSlot, &gen))
+        return false;
+    if (!JSVAL_IS_VOID(gen)) {
+        Generation::setReady(cx, gen, true);
+        *initialGeneration = false;
+    } else {
+        *initialGeneration = true;
+    }
+
+    // Create a fresh (non-ready) generation:
+    if (!Generation::create(cx, &gen))
+        return false;
+    return JS_SetReservedSlot(cx, _object, GenSlot, gen);
+}
+
 void TaskContext::resume(Runner *runner) {
     JSContext *cx = runner->cx();
     CrossCompartment cc(cx, _global);
@@ -823,11 +918,12 @@ void TaskContext::resume(Runner *runner) {
     // If we break from this loop, this task context has completed,
     // either in error or successfully:
     while (true) {
-        int gen = _generation++;
+        bool initialGeneration;
+        if (!newGeneration(cx, &initialGeneration))
+            break;
 
         JS_SetContextPrivate(cx, this);
-        if (gen == 0) {
-            // First round when task was just started
+        if (initialGeneration) {
             if (!_taskHandle->execute(cx, _object, _global))
                 break;
         } else {

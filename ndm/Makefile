@@ -18,7 +18,7 @@ ${BUILD}/MC: .MC.loc
 	./build-mozilla-central
 
 ${BUILD}/%.o: ${SRC}/%.cpp ${BUILD}/MC
-	g++ -DDEBUG -g -w -m64 \
+	g++ -DDEBUG -O0 -g -w -m64 \
 		-I ${INSTALL}/include \
 		-I ${INSTALL}/include/js \
 		-I ${INSTALL}/include/nspr \
@@ -36,9 +36,9 @@ ${BUILD}/spork: \
 
 TAGS: .MC.loc
 	ctags -e -f TAGS.emacs -R ${SRC} \
-		$(cat .MC.loc)/js \
-		$(cat .MC.loc)/nsprpub \
-		$(cat .MC.loc)/mfbt
+		$$(cat .MC.loc)/js \
+		$$(cat .MC.loc)/nsprpub \
+		$$(cat .MC.loc)/mfbt
 
 clean:
 	rm -rf ${BUILD}
