@@ -40,14 +40,13 @@
  * ***** END LICENSE BLOCK ***** */
 
 #include "membrane.h"
-#include <js/jsgc.h>
 #include <vm/String.h>
 
 namespace spork {
 
 Membrane *Membrane::create(JSContext* cx, JSObject *gl) {
     Membrane *m = new Membrane(cx, gl);
-    if (!m->_proxyMap.init()) {
+    if (!m->_map.init()) {
         delete m;
         return NULL;
     }
@@ -66,6 +65,17 @@ Membrane::IsCrossThreadWrapper(const JSObject *wrapper)
 static inline JSCompartment*
 GetStringCompartment(JSString *obj) {
     return reinterpret_cast<js::gc::Cell *>(obj)->compartment();
+}
+
+bool Membrane::wrap(JSObject **objp)
+{
+    if (!*objp)
+        return true;
+    AutoValueRooter tvr(_childCx, ObjectValue(**objp));
+    if (!wrap(tvr.addr()))
+        return false;
+    *objp = &tvr.value().toObject();
+    return true;
 }
 
 bool Membrane::wrap(Value *vp) {
@@ -111,24 +121,24 @@ bool Membrane::wrap(Value *vp) {
             return true;
 
         /* Translate StopIteration singleton. */
-        if (obj->isStopIteration())
-            return js_FindClassObject(cx, NULL, JSProto_StopIteration, vp);
+        //NDM if (obj->isStopIteration())
+        //NDM    return js_FindClassObject(cx, NULL, JSProto_StopIteration, vp);
     }
 
 
     /* If we already have a wrapper for this value, use it. */
-    ProxyMap::Ptr p = _proxyMap.lookup(*vp);
+    WrapperMap::Ptr p = _map.lookup(*vp);
     if (p.found()) {
         *vp = p->value;
         if (vp->isObject()) {
             JSObject *obj = &vp->toObject();
             JS_ASSERT(IsCrossThreadWrapper(obj));
-            if (global->getClass() != &dummy_class &&
-                obj->getParent() != global) {
+            if (/*JS_GetClass(cx, global) != &dummy_class &&*/
+                JS_GetParent(cx, obj) != global) {
                 do {
-                    if (!obj->setParent(cx, global))
+                    if (!JS_SetParent(cx, obj, global))
                         return false;
-                    obj = obj->getProto();
+                    obj = JS_GetPrototype(cx, obj);
                 } while (obj && IsCrossThreadWrapper(obj));
             }
         }
@@ -142,11 +152,11 @@ bool Membrane::wrap(Value *vp) {
         const jschar *chars = str->getChars(cx);
         if (!chars)
             return false;
-        JSString *wrapped = js_NewStringCopyN(cx, chars, str->length());
+        JSString *wrapped = JS_NewUCStringCopyN(cx, chars, str->length());
         if (!wrapped)
             return false;
         vp->setString(wrapped);
-        return _proxyMap.put(orig, *vp);
+        return _map.put(orig, *vp);
     }
 
     JSObject *obj = &vp->toObject();
@@ -161,14 +171,14 @@ bool Membrane::wrap(Value *vp) {
      * here (since Object.prototype->parent->proto leads to Object.prototype
      * itself).
      */
-    JSObject *proto = obj->getProto();
+    JSObject *proto = JS_GetPrototype(cx, obj);
     if (!wrap(&proto))
         return false;
 
     JSObject *wrapper = New(cx, obj, proto, global, this);
-    vp->setObject(wrapper);
+    vp->setObject(*wrapper);
 
-    if (!_proxyMap.put(GetProxyPrivate(wrapper), *vp))
+    if (!_map.put(GetProxyPrivate(wrapper), *vp))
         return false;
 
     return true;

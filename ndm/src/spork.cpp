@@ -39,6 +39,7 @@
  *
  * ***** END LICENSE BLOCK ***** */
 
+#include <memory>
 #include <string.h>
 #include <pthread.h>
 #include <nspr/prthread.h>

@@ -2,6 +2,7 @@
 #define MEMBRANE_H
 
 #include <js/jsapi.h>
+#include <js/jsgc.h>
 #include <js/jsfriendapi.h>
 #include <js/HashTable.h>
 #include <js/jswrapper.h>
@@ -9,8 +10,6 @@
 namespace spork {
 
 using namespace js;
-
-typedef HashMap<Value, Value> ProxyMap;
 
 class Membrane : Wrapper
 {
@@ -22,14 +21,13 @@ private:
 
     // Maps from objects in the parent space to wrapper object in
     // child space.
-    ProxyMap _proxyMap;
+    WrapperMap _map;
     JSContext *_childCx;
     JSObject *_childGlobal;
     JSCompartment *_childCompartment;
 
     Membrane(JSContext* cx, JSObject *gl)
         : Wrapper(MEMBRANE)
-        , _proxyMap(TempAllocPolicy(cx))
         , _childCx(cx)
         , _childGlobal(gl)
     {
@@ -44,6 +42,8 @@ public:
     // child compartment that will permit read access to the parent
     // object.  returns true if successful.
     bool wrap(Value *vp);
+
+    bool wrap(JSObject **objp);
 };
 
 }
