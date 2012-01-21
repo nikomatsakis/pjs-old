@@ -6,9 +6,9 @@ bar = fork(function(ctx) { print("in_fork 2"); setresult(23); });
 oncompletion(function() {
     print("in_completion");
     print("result of foo: ");
-    print(gettaskresult(foo));
+    print(foo.get());
     print("result of bar: ");
-    print(gettaskresult(bar));
+    print(bar.get());
 });
 i++;
 }
