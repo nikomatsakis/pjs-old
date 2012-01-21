@@ -214,16 +214,6 @@ template<typename T> T* check_null(T* ptr) {
     return ptr;
 }
 
-template<typename T> T* getReservedSlot(JSContext *cx,
-                                        JSObject *of_obj,
-                                        int slot) {
-    jsval val;
-    if (!JS_GetReservedSlot(cx, of_obj, slot, &val))
-        return NULL;
-    JSObject *object = JSVAL_TO_OBJECT(val);
-    return (T*) JS_GetPrivate(cx, object);
-}
-
 typedef Vector<TaskHandle*, 4, SystemAllocPolicy> TaskHandleVec;
 typedef Vector<TaskContext*, 4, SystemAllocPolicy> TaskContextVec;
 
