@@ -290,26 +290,27 @@ public:
 
 // ____________________________________________________________
 // Closure interface
-// 
-// class Closure
-// {
-// private:
-//     char *_toExec;
-//     jsval *_args;
-//     int _argsCount;
-// 
-//     Closure(char *toExec, jsval *args, int argsCount)
-//         : _toExec(toExec)
-//         , _args(args)
-//         , _argsCount(argsCount)
-//     {}
-// 
-// public:
-//     Closure *create(JSContext *cx, JSString *toExec,
-//                     jsval *args, int argscnt);
-// 
-//     JSBool execute(JSContext *cx, jsval *rval);
-// };
+
+class Closure {
+private:
+    char *_text;
+    jsval *_argv;
+    uintN _argc;
+
+    Closure(char *text, jsval *argv, int argc)
+        : _text(text)
+        , _argv(argv)
+        , _argc(argc)
+    {}
+
+public:
+    ~Closure();
+
+    static Closure *create(JSContext *cx, JSString *text,
+                           const jsval *argv, int argc);
+
+    JSBool execute(JSContext *cx, JSObject *global, jsval *rval);
+};
 
 // ____________________________________________________________
 // TaskHandle interface
@@ -358,7 +359,7 @@ private:
     TaskContext *_parent;
     JSObject *_object;
 
-    char *_funcStr;
+    Closure *_closure;
 
     ClonedObj *_result;
 
@@ -366,10 +367,10 @@ private:
     JSBool delRoot(JSContext *cx);
 
     explicit ChildTaskHandle(JSContext *cx, TaskContext *parent, jsval gen,
-                             JSObject *object, char *toExec)
+                             JSObject *object, Closure *closure)
         : _parent(parent)
         , _object(object)
-        , _funcStr(toExec)
+        , _closure(closure)
         , _result(NULL)
     {
         JS_SetPrivate(cx, _object, this);
@@ -387,7 +388,7 @@ private:
 protected:
     virtual ~ChildTaskHandle() {
         clearResult();
-        delete[] _funcStr;
+        delete _closure;
     }
 
 public:
@@ -400,7 +401,7 @@ public:
 
     static ChildTaskHandle *create(JSContext *cx,
                                    TaskContext *parent,
-                                   char *toExec);
+                                   Closure *closure);
 
     static JSBool initClass(JSContext *cx, JSObject *global);
 };
@@ -605,18 +606,15 @@ JSBool print(JSContext *cx, uintN argc, jsval *vp) {
 JSBool fork(JSContext *cx, uintN argc, jsval *vp) {
     TaskContext *taskContext = (TaskContext*) JS_GetContextPrivate(cx);
 
-    JSString *str;
-    if (!JS_ConvertArguments(cx, argc, JS_ARGV(cx, vp), "S", &str))
+    jsval *argv = JS_ARGV(cx, vp);
+    JSString *str = JS_ValueToString(cx, argv[0]);
+    Closure *closure = Closure::create(cx, str, argv+1, argc-1);
+    if (!closure) {
+        JS_ReportOutOfMemory(cx);
         return JS_FALSE;
+    }
 
-    int length = JS_GetStringEncodingLength(cx, str);
-    char *encoded = check_null(new char[length+3]);
-    JS_EncodeStringToBuffer(str, encoded+1, length);
-    encoded[0] = '(';
-    encoded[length+1] = ')';
-    encoded[length+2] = 0;
-
-    ChildTaskHandle *th = ChildTaskHandle::create(cx, taskContext, encoded);
+    ChildTaskHandle *th = ChildTaskHandle::create(cx, taskContext, closure);
     JS_SET_RVAL(cx, vp, OBJECT_TO_JSVAL(th->object()));
 
     taskContext->addTaskToFork(th);
@@ -703,7 +701,7 @@ JSClass Generation::jsClass = {
 };
 
 // ______________________________________________________________________
-// 
+// ClonedObj impl
 
 ClonedObj::~ClonedObj() {
     js::Foreground::free_(_data);
@@ -724,6 +722,38 @@ JSBool ClonedObj::unpack(JSContext *cx, jsval *rval) {
     return JS_ReadStructuredClone(cx, _data, _nbytes, 
                                   JS_STRUCTURED_CLONE_VERSION, rval,
                                   NULL, NULL);
+}
+
+// ______________________________________________________________________
+// Closure impl
+
+Closure *Closure::create(JSContext *cx, JSString *str,
+                         const jsval *argv, int argc) {
+    int length = JS_GetStringEncodingLength(cx, str);
+    char *encoded = check_null(new char[length+3]);
+    JS_EncodeStringToBuffer(str, encoded+1, length);
+    encoded[0] = '(';
+    encoded[length+1] = ')';
+    encoded[length+2] = 0;
+
+    jsval *argv1 = check_null(new jsval[argc]);
+    memcpy(argv1, argv, sizeof(jsval) * argc);
+
+    return new Closure(encoded, argv1, argc);
+}
+
+Closure::~Closure() {
+    delete[] _text;
+    delete[] _argv;
+}
+
+JSBool Closure::execute(JSContext *cx, JSObject *global, jsval *rval) {
+    jsval fnval;
+    if (!JS_EvaluateScript(cx, global, _text, strlen(_text),
+                           "fork", 1, &fnval))
+        return  0;
+
+    return JS_CallFunctionValue(cx, global, fnval, _argc, _argv, rval);
 }
 
 // ______________________________________________________________________
@@ -750,17 +780,12 @@ void ChildTaskHandle::onCompleted(Runner *runner, jsval result) {
 
 JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *taskctx,
                                 JSObject *global, jsval *rval) {
-    jsval fnval;
-    if (!JS_EvaluateScript(cx, global, _funcStr, strlen(_funcStr),
-                           "fork", 1, &fnval))
-        return  0;
-
-    return JS_CallFunctionValue(cx, global, fnval, 0, NULL, rval);
+    return _closure->execute(cx, global, rval);
 }
 
 ChildTaskHandle *ChildTaskHandle::create(JSContext *cx,
                                          TaskContext *parent,
-                                         char *toExec) {
+                                         Closure *closure) {
     jsval gen;
     if (!parent->getGeneration(cx, &gen))
         return NULL;
@@ -771,7 +796,7 @@ ChildTaskHandle *ChildTaskHandle::create(JSContext *cx,
         return NULL;
 
     // Create C++ object, which will be linked via Private:
-    ChildTaskHandle *th = new ChildTaskHandle(cx, parent, gen, object, toExec);
+    ChildTaskHandle *th = new ChildTaskHandle(cx, parent, gen, object, closure);
     th->addRoot(cx);
     return th;
 }
