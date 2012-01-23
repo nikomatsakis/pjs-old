@@ -42,6 +42,10 @@
 #include "membrane.h"
 #include <vm/String.h>
 
+using namespace JS;
+using namespace js;
+using namespace std;
+
 namespace spork {
 
 Membrane *Membrane::create(JSContext* cx, JSObject *gl) {
@@ -196,5 +200,253 @@ bool Membrane::enter(JSContext *cx, JSObject *wrapper,
         return false; // for now, prevent call operations
     }
 }
+
+#if 0
+#define PIERCE(cx, wrapper, mode, pre, op, post)            \
+    JS_BEGIN_MACRO                                          \
+        AutoCompartment call(cx, wrappedObject(wrapper));   \
+        if (!call.enter())                                  \
+            return false;                                   \
+        bool ok = (pre) && (op);                            \
+        call.leave();                                       \
+        return ok && (post);                                \
+    JS_END_MACRO
+
+#define NOTHING (true)
+
+bool
+Membrane::getPropertyDescriptor(JSContext *cx, JSObject *wrapper, jsid id,
+                                               bool set, PropertyDescriptor *desc)
+{
+    PIERCE(cx, wrapper, set ? SET : GET,
+           call.destination->wrapId(cx, &id),
+           Wrapper::getPropertyDescriptor(cx, wrapper, id, set, desc),
+           call.origin->wrap(cx, desc));
+}
+
+bool
+Membrane::getOwnPropertyDescriptor(JSContext *cx, JSObject *wrapper, jsid id,
+                                                  bool set, PropertyDescriptor *desc)
+{
+    PIERCE(cx, wrapper, set ? SET : GET,
+           call.destination->wrapId(cx, &id),
+           Wrapper::getOwnPropertyDescriptor(cx, wrapper, id, set, desc),
+           call.origin->wrap(cx, desc));
+}
+
+bool
+Membrane::getOwnPropertyNames(JSContext *cx, JSObject *wrapper, AutoIdVector &props)
+{
+    PIERCE(cx, wrapper, GET,
+           NOTHING,
+           Wrapper::getOwnPropertyNames(cx, wrapper, props),
+           call.origin->wrap(cx, props));
+}
+
+bool
+Membrane::enumerate(JSContext *cx, JSObject *wrapper, AutoIdVector &props)
+{
+    PIERCE(cx, wrapper, GET,
+           NOTHING,
+           Wrapper::enumerate(cx, wrapper, props),
+           call.origin->wrap(cx, props));
+}
+
+bool
+Membrane::has(JSContext *cx, JSObject *wrapper, jsid id, bool *bp)
+{
+    PIERCE(cx, wrapper, GET,
+           call.destination->wrapId(cx, &id),
+           Wrapper::has(cx, wrapper, id, bp),
+           NOTHING);
+}
+
+bool
+Membrane::hasOwn(JSContext *cx, JSObject *wrapper, jsid id, bool *bp)
+{
+    PIERCE(cx, wrapper, GET,
+           call.destination->wrapId(cx, &id),
+           Wrapper::hasOwn(cx, wrapper, id, bp),
+           NOTHING);
+}
+
+bool
+Membrane::get(JSContext *cx, JSObject *wrapper, JSObject *receiver, jsid id, Value *vp)
+{
+    PIERCE(cx, wrapper, GET,
+           call.destination->wrap(cx, &receiver) && call.destination->wrapId(cx, &id),
+           Wrapper::get(cx, wrapper, receiver, id, vp),
+           call.origin->wrap(cx, vp));
+}
+
+bool
+Membrane::keys(JSContext *cx, JSObject *wrapper, AutoIdVector &props)
+{
+    PIERCE(cx, wrapper, GET,
+           NOTHING,
+           Wrapper::keys(cx, wrapper, props),
+           call.origin->wrap(cx, props));
+}
+
+struct AutoCloseIterator
+{
+    AutoCloseIterator(JSContext *cx, JSObject *obj) : cx(cx), obj(obj) {}
+
+    ~AutoCloseIterator() { if (obj) js_CloseIterator(cx, obj); }
+
+    void clear() { obj = NULL; }
+
+  private:
+    JSContext *cx;
+    JSObject *obj;
+};
+
+bool
+Membrane::iterate(JSContext *cx, JSObject *wrapper, uintN flags, Value *vp)
+{
+    throw "FIXME";
+}
+
+bool
+Membrane::call(JSContext *cx, JSObject *wrapper, uintN argc, Value *vp)
+{
+    AutoCompartment call(cx, wrappedObject(wrapper));
+    if (!call.enter())
+        return false;
+
+    vp[0] = ObjectValue(*call.target);
+    if (!call.destination->wrap(cx, &vp[1]))
+        return false;
+    Value *argv = JS_ARGV(cx, vp);
+    for (size_t n = 0; n < argc; ++n) {
+        if (!call.destination->wrap(cx, &argv[n]))
+            return false;
+    }
+    if (!Wrapper::call(cx, wrapper, argc, vp))
+        return false;
+
+    call.leave();
+    return call.origin->wrap(cx, vp);
+}
+
+bool
+Membrane::construct(JSContext *cx, JSObject *wrapper, uintN argc, Value *argv,
+                                   Value *rval)
+{
+    AutoCompartment call(cx, wrappedObject(wrapper));
+    if (!call.enter())
+        return false;
+
+    for (size_t n = 0; n < argc; ++n) {
+        if (!call.destination->wrap(cx, &argv[n]))
+            return false;
+    }
+    if (!Wrapper::construct(cx, wrapper, argc, argv, rval))
+        return false;
+
+    call.leave();
+    return call.origin->wrap(cx, rval);
+}
+
+extern JSBool
+js_generic_native_method_dispatcher(JSContext *cx, uintN argc, Value *vp);
+
+bool
+Membrane::nativeCall(JSContext *cx, JSObject *wrapper, Class *clasp, Native native, CallArgs srcArgs)
+{
+    JS_ASSERT_IF(!srcArgs.calleev().isUndefined(),
+                 srcArgs.callee().toFunction()->native() == native ||
+                 srcArgs.callee().toFunction()->native() == js_generic_native_method_dispatcher);
+    JS_ASSERT(&srcArgs.thisv().toObject() == wrapper);
+    JS_ASSERT(!UnwrapObject(wrapper)->isMembrane());
+
+    JSObject *wrapped = wrappedObject(wrapper);
+    AutoCompartment call(cx, wrapped);
+    if (!call.enter())
+        return false;
+
+    InvokeArgsGuard dstArgs;
+    if (!cx->stack.pushInvokeArgs(cx, srcArgs.length(), &dstArgs))
+        return false;
+
+    Value *src = srcArgs.base(); 
+    Value *srcend = srcArgs.array() + srcArgs.length();
+    Value *dst = dstArgs.base();
+    for (; src != srcend; ++src, ++dst) {
+        *dst = *src;
+        if (!call.destination->wrap(cx, dst))
+            return false;
+    }
+
+    if (!Wrapper::nativeCall(cx, wrapper, clasp, native, dstArgs))
+        return false;
+
+    dstArgs.pop();
+    call.leave();
+    srcArgs.rval() = dstArgs.rval();
+    return call.origin->wrap(cx, &srcArgs.rval());
+}
+
+bool
+Membrane::hasInstance(JSContext *cx, JSObject *wrapper, const Value *vp, bool *bp)
+{
+    AutoCompartment call(cx, wrappedObject(wrapper));
+    if (!call.enter())
+        return false;
+
+    Value v = *vp;
+    if (!call.destination->wrap(cx, &v))
+        return false;
+    return Wrapper::hasInstance(cx, wrapper, &v, bp);
+}
+
+JSString *
+Membrane::obj_toString(JSContext *cx, JSObject *wrapper)
+{
+    AutoCompartment call(cx, wrappedObject(wrapper));
+    if (!call.enter())
+        return NULL;
+
+    JSString *str = Wrapper::obj_toString(cx, wrapper);
+    if (!str)
+        return NULL;
+
+    call.leave();
+    if (!call.origin->wrap(cx, &str))
+        return NULL;
+    return str;
+}
+
+JSString *
+Membrane::fun_toString(JSContext *cx, JSObject *wrapper, uintN indent)
+{
+    AutoCompartment call(cx, wrappedObject(wrapper));
+    if (!call.enter())
+        return NULL;
+
+    JSString *str = Wrapper::fun_toString(cx, wrapper, indent);
+    if (!str)
+        return NULL;
+
+    call.leave();
+    if (!call.origin->wrap(cx, &str))
+        return NULL;
+    return str;
+}
+
+bool
+Membrane::defaultValue(JSContext *cx, JSObject *wrapper, JSType hint, Value *vp)
+{
+    AutoCompartment call(cx, wrappedObject(wrapper));
+    if (!call.enter())
+        return false;
+
+    if (!Wrapper::defaultValue(cx, wrapper, hint, vp))
+        return false;
+
+    call.leave();
+    return call.origin->wrap(cx, vp);
+}
+#endif
 
 }

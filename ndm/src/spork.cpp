@@ -41,16 +41,18 @@
 
 #include <memory>
 #include <string.h>
-#include <pthread.h>
-#include <nspr/prthread.h>
-#include <nspr/prlock.h>
-#include <nspr/prcvar.h>
-#include <js/jsapi.h>
-#include <js/jslock.h>
+
+#include <prthread.h>
+#include <prlock.h>
+#include <prcvar.h>
+#include <jsapi.h>
+#include <jslock.h>
+#include "membrane.h"
 
 extern size_t gMaxStackSize;
 
 using namespace js;
+using namespace std;
 
 namespace spork {
 
@@ -424,15 +426,17 @@ private:
     jsrefcount _outstandingChildren;
     TaskHandleVec _toFork;
     Runner *_runner;
+    auto_ptr<Membrane> _membrane;
     
     TaskContext(JSContext *cx, TaskHandle *aTask,
                 Runner *aRunner, JSObject *aGlobal,
-                JSObject *object)
+                JSObject *object, auto_ptr<Membrane> aMembrane)
       : _taskHandle(aTask)
       , _global(aGlobal)
       , _object(object)
       , _outstandingChildren(0)
       , _runner(aRunner)
+      , _membrane(aMembrane)
     {
         setOncompletion(cx, JSVAL_NULL);
         JS_SetPrivate(cx, _object, this);
@@ -929,8 +933,14 @@ TaskContext *TaskContext::create(JSContext *cx,
         return NULL;
     }
 
+    auto_ptr<Membrane> membrane(Membrane::create(cx, aGlobal));
+    if (!membrane.get()) {
+        return NULL;
+    }
+
     // Create C++ object, which will be linked via Private:
-    TaskContext *tc = new TaskContext(cx, aTask, aRunner, aGlobal, object);
+    TaskContext *tc = new TaskContext(cx, aTask, aRunner, aGlobal,
+                                      object, membrane);
     if (!tc->addRoot(cx)) {
         delete tc;
     }

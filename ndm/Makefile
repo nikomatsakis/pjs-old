@@ -2,13 +2,14 @@ SRC=./src
 BUILD=./build
 INSTALL=./build/install
 MOZCENTRAL=./mozilla-central
+OBJS =											\
+	${BUILD}/spork.o							\
+	${BUILD}/main.o								\
+	${BUILD}/membrane.o
+
 .PHONY : all TAGS clean cleaner
 
 all: ${BUILD}/spork
-
-ifdef BUILD_MEMBRANE
-MEMBRANE_O = ${BUILD}/membrane.o
-endif
 
 .MC.loc:
 	./checkout-mozilla-central
@@ -18,31 +19,24 @@ ${BUILD}/MC: .MC.loc
 	./build-mozilla-central
 
 ${BUILD}/%.o: ${SRC}/%.cpp ${BUILD}/MC
-	g++ -DDEBUG -O0 -g -w -m64 \
-		-I ${INSTALL}/include \
-		-I ${INSTALL}/include/js \
-		-I ${INSTALL}/include/nspr \
+	g++ -DDEBUG -O0 -g -w -m64						\
+		$$(${BUILD}/install/bin/js-config --cflags)	\
 		-o $@ -c $<
 
-${BUILD}/spork: \
-		${BUILD}/spork.o \
-		${BUILD}/main.o \
-		${MEMBRANE_O} \
-		${BUILD}/MC
-	g++ -m64 \
-		-o $@ ${BUILD}/main.o ${BUILD}/spork.o \
-			${INSTALL}/lib/libjs_static.a \
-			${INSTALL}/lib/libnspr4.a
+${BUILD}/spork: ${OBJS} ${BUILD}/MC
+	g++ -m64										\
+		$$(${BUILD}/install/bin/js-config --libs)	\
+		-o $@ ${OBJS}
 
 TAGS: .MC.loc
-	ctags -e -f TAGS.emacs -R ${SRC} \
-		$$(cat .MC.loc)/js \
-		$$(cat .MC.loc)/nsprpub \
+	ctags -e -f TAGS.emacs -R ${SRC}			\
+		$$(cat .MC.loc)/js						\
+		$$(cat .MC.loc)/nsprpub					\
 		$$(cat .MC.loc)/mfbt
 
 clean:
 	rm -rf ${BUILD}
-	rm TAGS.emacs
+	rm -f TAGS.emacs
 
 cleaner: clean
-	rm -rf mozilla-central
+	rm -rf mozilla-central .MC.loc
