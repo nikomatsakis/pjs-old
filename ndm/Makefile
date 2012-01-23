@@ -3,7 +3,7 @@ BUILD=./build
 INSTALL=./build/install
 MOZCENTRAL=./mozilla-central
 OBJS =											\
-	${BUILD}/spork.o							\
+	${BUILD}/pjs.o								\
 	${BUILD}/main.o								\
 	${BUILD}/membrane.o
 

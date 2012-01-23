@@ -14,7 +14,7 @@
  * for the specific language governing rights and limitations under the
  * License.
  *
- * The Original Code is the Spork project.
+ * The Original Code is the Pjs project.
  *
  * The Initial Developer of the Original Code is
  * Mozilla Corporation.
@@ -54,7 +54,7 @@ extern size_t gMaxStackSize;
 using namespace js;
 using namespace std;
 
-namespace spork {
+namespace pjs {
 
 /*************************************************************
  * Architecture
@@ -641,7 +641,7 @@ JSBool oncompletion(JSContext *cx, uintN argc, jsval *vp) {
     return JS_TRUE;
 }
 
-static JSFunctionSpec sporkGlobalFunctions[] = {
+static JSFunctionSpec pjsGlobalFunctions[] = {
     JS_FN("print", print, 0, 0),
     JS_FN("fork", fork, 1, 0),
     JS_FN("oncompletion", oncompletion, 1, 0),
@@ -1065,7 +1065,7 @@ Runner *Runner::create(ThreadPool *aThreadPool, int anIndex) {
     JS_SetErrorReporter(cx, reportError);
     JS_ClearContextThread(cx);
     JS_ClearRuntimeThread(rt);
-    if(getenv("SPORK_ZEAL") != NULL)
+    if(getenv("PJS_ZEAL") != NULL)
         JS_SetGCZeal(cx, 2, 1, false);
     return new Runner(aThreadPool, anIndex, rt, cx);
 }
@@ -1137,7 +1137,7 @@ TaskContext *Runner::createTaskContext(TaskHandle *handle) {
     if (!JS_InitStandardClasses(_cx, global))
         return NULL;
         
-    if (!JS_DefineFunctions(_cx, global, sporkGlobalFunctions))
+    if (!JS_DefineFunctions(_cx, global, pjsGlobalFunctions))
         return NULL;
 
     if (!ChildTaskHandle::initClass(_cx, global))

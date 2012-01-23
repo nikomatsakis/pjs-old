@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include "spork.h"
+#include "pjs.h"
 
 int main(int argc, const char *argv[])
 {
@@ -7,7 +7,7 @@ int main(int argc, const char *argv[])
         fprintf(stderr, "Usage: spork script.js\n");
         return 1;
     } else {
-        spork::init(argv[1]);
+        pjs::init(argv[1]);
         return 0;
     }
 }

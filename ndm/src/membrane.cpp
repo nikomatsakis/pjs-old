@@ -14,7 +14,7 @@
  * for the specific language governing rights and limitations under the
  * License.
  *
- * The Original Code is the Spork project.
+ * The Original Code is the PJs project.
  *
  * The Initial Developer of the Original Code is
  * Mozilla Corporation.
@@ -46,7 +46,7 @@ using namespace JS;
 using namespace js;
 using namespace std;
 
-namespace spork {
+namespace pjs {
 
 Membrane *Membrane::create(JSContext* cx, JSObject *gl) {
     Membrane *m = new Membrane(cx, gl);
