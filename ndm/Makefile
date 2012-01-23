@@ -19,13 +19,15 @@ ${BUILD}/MC: .MC.loc
 	./build-mozilla-central
 
 ${BUILD}/%.o: ${SRC}/%.cpp ${BUILD}/MC
-	g++ -DDEBUG -O0 -g -w -m64						\
+	g++ -DDEBUG -O0 -g -w -m64 -fno-rtti			\
 		$$(${BUILD}/install/bin/js-config --cflags)	\
 		-o $@ -c $<
 
 ${BUILD}/spork: ${OBJS} ${BUILD}/MC
-	g++ -m64										\
-		$$(${BUILD}/install/bin/js-config --libs)	\
+#		$$(${BUILD}/install/bin/js-config --libs)
+	g++ -m64									\
+		${BUILD}/install/lib/libjs_static.a		\
+		${BUILD}/install/lib/libnspr4.a			\
 		-o $@ ${OBJS}
 
 TAGS: .MC.loc
