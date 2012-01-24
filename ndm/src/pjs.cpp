@@ -762,18 +762,15 @@ JSBool Closure::execute(Membrane *m, JSContext *cx,
                            "fork", 1, &fnval))
         return JS_FALSE;
 
-    jsval *argv = new jsval[_argc];
+    auto_arr<jsval> argv(new jsval[_argc]);
+    if (!argv.get()) return JS_FALSE;
     for (int i = 0; i < _argc; i++) {
         argv[i] = _argv[i];
         if (!m->wrap(&argv[i]))
-            goto fail;
+            return JS_FALSE;
     }
 
-    return JS_CallFunctionValue(cx, global, fnval, _argc, argv, rval);
-
-fail:
-    if (argv) delete[] argv;
-    return JS_FALSE;
+    return JS_CallFunctionValue(cx, global, fnval, _argc, argv.get(), rval);
 }
 
 // ______________________________________________________________________

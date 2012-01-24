@@ -42,6 +42,8 @@
 #include "membrane.h"
 #include <vm/String.h>
 
+#include "js/src/jsobj.h"
+
 using namespace JS;
 using namespace js;
 using namespace std;
@@ -142,7 +144,7 @@ bool Membrane::wrap(Value *vp) {
                 do {
                     if (!JS_SetParent(cx, obj, global))
                         return false;
-                    obj = JS_GetPrototype(cx, obj);
+                    obj = obj->getProto();
                 } while (obj && IsCrossThreadWrapper(obj));
             }
         }
@@ -175,7 +177,7 @@ bool Membrane::wrap(Value *vp) {
      * here (since Object.prototype->parent->proto leads to Object.prototype
      * itself).
      */
-    JSObject *proto = JS_GetPrototype(cx, obj);
+    JSObject *proto = obj->getProto();
     if (!wrap(&proto))
         return false;
 
