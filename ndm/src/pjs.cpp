@@ -48,6 +48,7 @@
 #include <jsapi.h>
 #include <jslock.h>
 #include "membrane.h"
+#include "util.h"
 
 extern size_t gMaxStackSize;
 
@@ -297,24 +298,26 @@ public:
 class Closure {
 private:
     char *_text;
-    ClonedObj **_argv;
+    jsval *_argv;
     uintN _argc;
 
-    Closure(char *text, ClonedObj **argv, uintN argc)
+    Closure(char *text, jsval *argv, uintN argc)
         : _text(text)
         , _argv(argv)
         , _argc(argc)
     {}
 
-    static void del(char *encoded, ClonedObj **argv, int argc);
-
 public:
-    ~Closure();
+    ~Closure() {
+        delete[] _text;
+        delete[] _argv;
+    }
 
     static Closure *create(JSContext *cx, JSString *text,
                            const jsval *argv, int argc);
 
-    JSBool execute(JSContext *cx, JSObject *global, jsval *rval);
+    JSBool execute(Membrane *m, JSContext *cx,
+                   JSObject *global, jsval *rval);
 };
 
 // ____________________________________________________________
@@ -333,7 +336,7 @@ protected:
 public:
     virtual ~TaskHandle() {}
 
-    virtual JSBool execute(JSContext *cx, JSObject *taskctx,
+    virtual JSBool execute(Membrane *m, JSContext *cx, JSObject *taskctx,
                            JSObject *global, jsval *rval) = 0;
     virtual void onCompleted(Runner *runner, jsval result) = 0;
 };
@@ -347,7 +350,7 @@ public:
         : scriptfn(afn)
     {}
 
-    virtual JSBool execute(JSContext *cx, JSObject *taskctx,
+    virtual JSBool execute(Membrane *m, JSContext *cx, JSObject *taskctx,
                            JSObject *global, jsval *rval);
     virtual void onCompleted(Runner *runner, jsval result);
 };
@@ -398,7 +401,7 @@ protected:
 
 public:
     JSBool GetResult(JSContext *cx, jsval *rval);
-    virtual JSBool execute(JSContext *cx, JSObject *taskctx,
+    virtual JSBool execute(Membrane *m, JSContext *cx, JSObject *taskctx,
                            JSObject *global, jsval *rval);
     virtual void onCompleted(Runner *runner, jsval result);
 
@@ -737,42 +740,23 @@ JSBool ClonedObj::unpack(JSContext *cx, jsval *rval) {
 Closure *Closure::create(JSContext *cx, JSString *str,
                          const jsval *argv, int argc) {
     int length = JS_GetStringEncodingLength(cx, str);
-    char *encoded = check_null(new char[length+3]);
-    JS_EncodeStringToBuffer(str, encoded+1, length);
+    auto_arr<char> encoded(new char[length+3]);
+    if (!encoded.get()) return NULL;
+    JS_EncodeStringToBuffer(str, &encoded[1], length);
     encoded[0] = '(';
     encoded[length+1] = ')';
     encoded[length+2] = 0;
 
-    ClonedObj **argv1 = new ClonedObj*[argc];
-    memset(argv1, 0, sizeof(ClonedObj*) * argc);
+    auto_arr<jsval> argv1(new jsval[argc]);
+    if (!argv1.get()) return NULL;
+    for (int i = 0; i < argc; i++)
+        argv1[i] = argv[i];
 
-    for (int i = 0; i < argc; i++) {
-        if (!ClonedObj::pack(cx, argv[i], argv1+i))
-            goto fail;
-    }
-
-    return new Closure(encoded, argv1, argc);
-
-fail:
-    del(encoded, argv1, argc);
-    return NULL;
+    return new Closure(encoded.release(), argv1.release(), argc);
 }
 
-void
-Closure::del(char *encoded, ClonedObj **argv, int argc) {
-    delete[] encoded;
-    for (int i = 0; i < argc; i++) {
-        if (argv[i])
-            delete argv[i];
-    }
-    delete[] argv;
-}
-
-Closure::~Closure() {
-    del(_text, _argv, _argc);
-}
-
-JSBool Closure::execute(JSContext *cx, JSObject *global, jsval *rval) {
+JSBool Closure::execute(Membrane *m, JSContext *cx,
+                        JSObject *global, jsval *rval) {
     jsval fnval;
     if (!JS_EvaluateScript(cx, global, _text, strlen(_text),
                            "fork", 1, &fnval))
@@ -780,9 +764,9 @@ JSBool Closure::execute(JSContext *cx, JSObject *global, jsval *rval) {
 
     jsval *argv = new jsval[_argc];
     for (int i = 0; i < _argc; i++) {
-        if (!_argv[i]->unpack(cx, argv+i)) {
+        argv[i] = _argv[i];
+        if (!m->wrap(&argv[i]))
             goto fail;
-        }
     }
 
     return JS_CallFunctionValue(cx, global, fnval, _argc, argv, rval);
@@ -799,7 +783,7 @@ void RootTaskHandle::onCompleted(Runner *runner, jsval result) {
     runner->terminate();
 }
 
-JSBool RootTaskHandle::execute(JSContext *cx, JSObject *taskctx,
+JSBool RootTaskHandle::execute(Membrane *m, JSContext *cx, JSObject *taskctx,
                                JSObject *global, jsval *rval) {
     JSScript *scr = JS_CompileUTF8File(cx, global, scriptfn);
     if (scr == NULL)
@@ -814,9 +798,9 @@ void ChildTaskHandle::onCompleted(Runner *runner, jsval result) {
     delRoot(runner->cx());
 }
 
-JSBool ChildTaskHandle::execute(JSContext *cx, JSObject *taskctx,
+JSBool ChildTaskHandle::execute(Membrane *m, JSContext *cx, JSObject *taskctx,
                                 JSObject *global, jsval *rval) {
-    return _closure->execute(cx, global, rval);
+    return _closure->execute(m, cx, global, rval);
 }
 
 ChildTaskHandle *ChildTaskHandle::create(JSContext *cx,
@@ -1008,7 +992,8 @@ void TaskContext::resume(Runner *runner) {
 
         JS_SetContextPrivate(cx, this);
         if (initialGeneration) {
-            if (!_taskHandle->execute(cx, _object, _global, &rval))
+            if (!_taskHandle->execute(_membrane.get(), cx, _object,
+                                      _global, &rval))
                 break;
         } else {
             jsval fn;
